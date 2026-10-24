@@ -1,0 +1,31 @@
+[Unit]
+Description=MacroLog self-hosted calorie tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Create with: useradd -r -m -d /opt/macrolog macrolog
+User=macrolog
+Group=macrolog
+WorkingDirectory=/opt/macrolog
+
+# Secrets and provider keys live here (chmod 600, owned by the service user).
+EnvironmentFile=-/opt/macrolog/.env
+Environment=MACROLOG_HOST=0.0.0.0
+Environment=MACROLOG_PORT=8765
+Environment=MACROLOG_DATA=/opt/macrolog/data
+
+ExecStart=/usr/bin/python3 /opt/macrolog/server.py
+Restart=on-failure
+RestartSec=3
+
+# Modest hardening; the app only needs its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/macrolog/data
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

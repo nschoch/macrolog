@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>MacroLog</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">MacroLog</div>
+  <nav class="tabs" id="tabs">
+    <button data-view="today" class="active">Today</button>
+    <button data-view="trend">Trend</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+</header>
+
+<main id="main">
+  <!-- ============================ TODAY ============================ -->
+  <section id="view-today" class="view active">
+    <div class="rings">
+      <svg viewBox="0 0 200 200" class="ring-svg" aria-hidden="true">
+        <circle cx="100" cy="100" r="86" class="ring-track"/>
+        <circle cx="100" cy="100" r="86" class="ring-fill" id="ring-cal"/>
+      </svg>
+      <div class="ring-center">
+        <div class="ring-big" id="kcal-left">–</div>
+        <div class="ring-label" id="ring-label">kcal left</div>
+      </div>
+    </div>
+
+    <div class="macro-row" id="macro-row"></div>
+
+    <div class="status-strip" id="status-strip"></div>
+
+    <div class="section-head">
+      <h2>Meals</h2>
+      <button class="ghost" id="btn-manual">+ Manual</button>
+    </div>
+    <ul class="meal-list" id="meal-list"></ul>
+    <p class="empty" id="meals-empty" hidden>No meals logged yet. Tap the camera to start.</p>
+  </section>
+
+  <!-- ============================ TREND ============================ -->
+  <section id="view-trend" class="view">
+    <div class="stat-cards" id="trend-stats"></div>
+    <div class="chart-card">
+      <div class="chart-head"><h3>Weight</h3><span class="muted" id="weight-sub"></span></div>
+      <canvas id="chart-weight" height="170"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-head"><h3>Intake vs target</h3><span class="muted">last 30 days</span></div>
+      <canvas id="chart-intake" height="170"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-head"><h3>Estimator accuracy</h3><span class="muted" id="acc-sub">your corrections train it</span></div>
+      <div id="accuracy"></div>
+    </div>
+  </section>
+
+  <!-- ========================== SETTINGS =========================== -->
+  <section id="view-settings" class="view">
+    <div class="card">
+      <h3>Your body</h3>
+      <div class="grid2">
+        <label>Sex<select id="s-sex"><option value="male">Male</option><option value="female">Female</option></select></label>
+        <label>Age<input id="s-age" type="number" inputmode="numeric" min="14" max="100"></label>
+        <label>Height (cm)<input id="s-height" type="number" inputmode="decimal" min="100" max="230"></label>
+        <label>Activity
+          <select id="s-activity">
+            <option value="1.2">Sedentary (desk)</option>
+            <option value="1.35">Light (1-3 workouts)</option>
+            <option value="1.5">Moderate (3-5)</option>
+            <option value="1.7">High (6-7)</option>
+            <option value="1.9">Athlete</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Goal</h3>
+      <div class="grid2">
+        <label>Weekly change (kg)<input id="s-rate" type="number" step="0.05" inputmode="decimal" min="-1.5" max="1"></label>
+        <label>Protein (g per kg)<input id="s-protein" type="number" step="0.1" inputmode="decimal" min="0.8" max="3"></label>
+        <label>Fat (% of kcal)<input id="s-fatpct" type="number" step="0.05" inputmode="decimal" min="0.15" max="0.6"></label>
+        <label>Calorie target
+          <div class="inline-input"><input id="s-target" type="number" inputmode="numeric" min="1000" max="8000">
+          <button class="ghost tiny" id="btn-unlock" title="Lock target against auto-adjust">auto</button></div>
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" id="s-autoadapt"> Adjust my target automatically from weight trend</label>
+      <label class="check"><input type="checkbox" id="s-calibrate"> Calibrate estimates with my past corrections</label>
+    </div>
+
+    <div class="card">
+      <h3>Vision providers</h3>
+      <p class="hint">Tried top to bottom; first success wins. Keys come from environment or <code>.env</code>, never stored in the browser.</p>
+      <div id="provider-list"></div>
+      <button class="ghost" id="btn-test">Test connection</button>
+      <pre class="test-out" id="test-out" hidden></pre>
+    </div>
+
+    <div class="card">
+      <h3>Data</h3>
+      <p class="hint">Everything lives in <code>data/</code>: one SQLite file plus photos. Back it up by copying that folder.</p>
+      <a class="ghost btn-link" href="/api/export">Download JSON backup</a>
+    </div>
+    <div class="save-bar"><button id="btn-save" class="primary">Save settings</button></div>
+  </section>
+</main>
+
+<div class="fab-wrap">
+  <button class="fab" id="btn-photo" aria-label="Log a meal photo">
+    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.9">
+      <path d="M4 7h3l1.5-2h7L17 7h3a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1V8a1 1 0 011-1z"/>
+      <circle cx="12" cy="13" r="3.4"/>
+    </svg>
+  </button>
+</div>
+<input type="file" id="file-input" accept="image/*" capture="environment" hidden>
+
+<!-- ======================= ESTIMATE REVIEW SHEET ===================== -->
+<div class="sheet-backdrop" id="review-sheet" hidden>
+  <div class="sheet">
+    <div class="sheet-grab"></div>
+    <h3>Does this look right?</h3>
+    <p class="hint">Fix anything wrong — your corrections teach the estimator. Editing later also trains it.</p>
+    <img id="review-img" alt="your meal" class="review-img">
+    <div class="photo-actions"><button class="ghost tiny" id="btn-recrop">Choose different photo</button></div>
+    <label class="fld">Description<input id="r-desc" type="text" placeholder="what did you eat?"></label>
+    <div class="grid4">
+      <label class="fld">kcal<input id="r-cal" type="number" inputmode="numeric"></label>
+      <label class="fld">P (g)<input id="r-pro" type="number" inputmode="numeric"></label>
+      <label class="fld">C (g)<input id="r-car" type="number" inputmode="numeric"></label>
+      <label class="fld">F (g)<input id="r-fat" type="number" inputmode="numeric"></label>
+    </div>
+    <div class="items" id="r-items"></div>
+    <label class="fld">Meal
+      <select id="r-kind"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
+      <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
+      <option value="other">Other</option></select>
+    </label>
+    <p class="prov-line" id="r-prov"></p>
+    <div class="sheet-btns">
+      <button class="ghost" id="btn-cancel-review">Cancel</button>
+      <button class="primary" id="btn-save-review">Add to log</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========================= MANUAL ENTRY SHEET ====================== -->
+<div class="sheet-backdrop" id="manual-sheet" hidden>
+  <div class="sheet">
+    <div class="sheet-grab"></div>
+    <h3>Log manually</h3>
+    <label class="fld">Description<input id="m-desc" type="text" placeholder="e.g. protein shake"></label>
+    <div class="grid4">
+      <label class="fld">kcal<input id="m-cal" type="number" inputmode="numeric"></label>
+      <label class="fld">P (g)<input id="m-pro" type="number" inputmode="numeric"></label>
+      <label class="fld">C (g)<input id="m-car" type="number" inputmode="numeric"></label>
+      <label class="fld">F (g)<input id="m-fat" type="number" inputmode="numeric"></label>
+    </div>
+    <label class="fld">Meal
+      <select id="m-kind"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
+      <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
+      <option value="other">Other</option></select>
+    </label>
+    <div class="sheet-btns">
+      <button class="ghost" id="btn-cancel-manual">Cancel</button>
+      <button class="primary" id="btn-save-manual">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= WEIGHT ============================== -->
+<div class="weight-dock" id="weight-dock">
+  <input id="w-value" type="number" inputmode="decimal" step="0.1" placeholder="weight (kg)" aria-label="today's weight">
+  <button id="btn-weight" class="primary small">Log</button>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<div class="loading" id="loading" hidden><div class="spinner"></div><span id="loading-text">Analyzing photo…</span></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

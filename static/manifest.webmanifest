@@ -1,0 +1,12 @@
+{
+  "name": "MacroLog",
+  "short_name": "MacroLog",
+  "description": "Self-hosted AI photo calorie and macro tracker",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": [
+    { "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any" }
+  ]
+}
