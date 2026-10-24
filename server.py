@@ -20,7 +20,7 @@ import uuid
 from datetime import date, datetime
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote as _urlquote, unquote as _urlunquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -29,6 +29,10 @@ from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           record_correction, tdee_from_formula, weight_trend)
 from app.database import Database
 from app.vision import ProviderError, estimate_photo
+from app import auth as OIDC
+
+SESSION_COOKIE = "macrolog_session"
+STATE_COOKIE = "macrolog_oidc_state"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("MACROLOG_DATA", os.path.join(ROOT, "data"))
@@ -85,13 +89,35 @@ def load_env():
             pass
 
 
-def get_settings() -> dict:
+# Settings keys that are per-person vs shared across all users.
+USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
+                     "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
+                     "calorie_target", "start_date", "starting_weight_kg",
+                     "auto_adapt", "calibrate_estimates"}
+
+
+def get_settings(owner: str = "default") -> dict:
+    """Merge defaults <- shared settings <- this user's personal settings."""
     merged = json.loads(json.dumps(DEFAULT_SETTINGS))
-    stored = db.get_setting("settings", {}) or {}
-    if isinstance(stored, dict):
-        stored.pop("api_key", None)          # never carry secrets into settings blob
-        merged.update(stored)
+    shared = db.get_setting("settings", {}) or {}
+    if isinstance(shared, dict):
+        shared.pop("api_key", None)
+        # Only provider/vision config is shared; ignore stray legacy keys here.
+        for k, v in shared.items():
+            if k not in USER_SETTING_KEYS:
+                merged[k] = v
+    personal = db.get_setting(f"settings:{owner}", {}) or {}
+    if isinstance(personal, dict):
+        merged.update(personal)
     return merged
+
+
+def save_user_settings(owner: str, updates: dict) -> None:
+    cur = db.get_setting(f"settings:{owner}", {}) or {}
+    for k, v in updates.items():
+        if k in USER_SETTING_KEYS:
+            cur[k] = v
+    db.set_setting(f"settings:{owner}", cur)
 
 
 def today_str() -> str:
@@ -115,12 +141,13 @@ class Api:
     # ---- bootstrap / state -------------------------------------------
     @staticmethod
     def GET_state(h, q, body):
-        s = get_settings()
+        owner = getattr(h, "owner", "default")
+        s = get_settings(owner)
         t = today_str()
-        meals = db.meals_for_date(t)
+        meals = db.meals_for_date(t, owner)
         consumed = {k: round(sum(float(m[k]) for m in meals), 1)
                     for k in ("calories", "protein", "carbs", "fat")}
-        rows = db.query("SELECT date, value FROM weights ORDER BY date")
+        rows = db.query("SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
         trend = weight_trend(rows)
         target = s.get("calorie_target") or tdee_from_formula(
             s, trend["current_kg"]) or 2200
@@ -135,7 +162,9 @@ class Api:
             "consumed": consumed, "targets": targets, "trend": trend,
             "settings": _public_settings(s), "providers": providers,
             "active_provider": ready[0] if ready else "stub",
-            "exercise": _exercise_total(t),
+            "exercise": _exercise_total(t, owner),
+            "user": getattr(h, "user", None),
+            "auth_enabled": OIDC.enabled(),
             "needs_setup": not s.get("start_date"),
             "weights_count": len(rows),
         }
@@ -144,12 +173,13 @@ class Api:
     @staticmethod
     def POST_estimate(h, q, body):
         """Photo -> estimate, preview only. Nothing is written until /meals."""
+        owner = getattr(h, "owner", "default")
         upload = getattr(h, "_upload", None)
         if not upload:
             return 400, {"error": "no image received (send multipart form-data field 'photo')"}
         path, mime = upload
         try:
-            meal, provider, model = estimate_photo(path, get_settings())
+            meal, provider, model = estimate_photo(path, get_settings(owner))
         except ProviderError as e:
             _unlink(path)
             return 502, {"error": f"all providers failed: {e}"}
@@ -159,16 +189,17 @@ class Api:
         if not meal["items"] and not meal["calories"]:
             _unlink(path)
             return 422, {"error": meal.get("notes") or "no food detected in image"}
-        s = get_settings()
+        s = get_settings(owner)
         changed = False
         if s.get("calibrate_estimates"):
-            meal, changed = apply_calibration(meal, calibration_multipliers(db))
+            meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
         return 200, {"estimate": meal, "provider": provider, "model": model,
                      "calibrated": changed, "temp_photo": path}
 
     @staticmethod
     def POST_meals(h, q, body):
-        s = get_settings()
+        owner = getattr(h, "owner", "default")
+        s = get_settings(owner)
         photo = body.get("photo_path")
         source = body.get("source", "photo")
         if photo and not os.path.abspath(photo).startswith(os.path.abspath(PHOTO_DIR)):
@@ -195,83 +226,86 @@ class Api:
             photo_path=final_path, source=source,
             provider=str(body.get("provider") or "")[:30],
             model=str(body.get("model") or "")[:60],
-            raw_json=json.dumps(body.get("raw") or {})[:8000])
-        _maybe_adapt(s)
-        return 201, {"id": mid, **_day_summary(d)}
+            raw_json=json.dumps(body.get("raw") or {})[:8000], owner=owner)
+        _maybe_adapt(s, owner=owner)
+        return 201, {"id": mid, **_day_summary(d, owner)}
 
     @staticmethod
     def PATCH_meal(h, q, body, meal_id):
-        old = db.one("SELECT * FROM meals WHERE id=?", (meal_id,))
+        owner = getattr(h, "owner", "default")
+        old = db.get_meal(int(meal_id), owner)
         if not old:
             return 404, {"error": "meal not found"}
         fields = {k: v for k, v in body.items()
                   if k in ("kind", "description", "calories", "protein", "carbs", "fat")}
         if not fields:
             return 400, {"error": "no editable fields supplied"}
-        db.update_meal(meal_id, **fields)
+        db.update_meal(int(meal_id), owner=owner, **fields)
         new = dict(old)
         new.update(fields)
         n = record_correction(db, int(meal_id), {
             "calories": old["calories"], "protein": old["protein"],
             "carbs": old["carbs"], "fat": old["fat"]}, new, int(time.time()))
-        s = get_settings()
-        _maybe_adapt(s)
+        s = get_settings(owner)
+        _maybe_adapt(s, owner=owner)
         return 200, {"updated": True, "corrections_recorded": n,
-                     "multipliers": calibration_multipliers(db),
-                     **_day_summary(old["date"])}
+                     "multipliers": calibration_multipliers(db, owner=owner),
+                     **_day_summary(old["date"], owner)}
 
     @staticmethod
     def DELETE_meal(h, q, body, meal_id):
-        row = db.one("SELECT * FROM meals WHERE id=?", (meal_id,))
+        owner = getattr(h, "owner", "default")
+        row = db.delete_meal(int(meal_id), owner)
         if not row:
             return 404, {"error": "meal not found"}
-        db.delete_meal(int(meal_id))
         if row["photo_path"] and os.path.exists(row["photo_path"]):
             try:
                 os.remove(row["photo_path"])
             except OSError:
                 pass
-        return 200, {"deleted": True, **_day_summary(row["date"])}
+        return 200, {"deleted": True, **_day_summary(row["date"], owner)}
 
     # ---- weight / composition -----------------------------------------
     @staticmethod
     def POST_weight(h, q, body):
+        owner = getattr(h, "owner", "default")
         raw = float(body.get("value") or 0)
         # Trust the unit the CLIENT declared for this value; fall back to the
         # stored preference only if it omitted one. Never guess silently.
-        unit = str(body.get("unit") or get_settings().get("units", "metric")).lower()
+        unit = str(body.get("unit") or get_settings(owner).get("units", "metric")).lower()
         val = raw / LB_PER_KG if unit in ("lb", "imperial", "lbs") else raw
         if val <= 0 or val > 700:      # validated in canonical kg
             return 400, {"error": "weight out of range"}
         d = body.get("date") or today_str()
-        db.set_weight(d, local_ts_for(d), round(val, 2))
+        db.set_weight(d, local_ts_for(d), round(val, 2), owner)
         if body.get("body_fat") is not None:
             bf = float(body["body_fat"])
             if 1 <= bf <= 70:
-                db.set_body_fat(d, local_ts_for(d), bf)
-        s = get_settings()
+                db.set_body_fat(d, local_ts_for(d), bf, owner)
+        s = get_settings(owner)
         if not s.get("start_date"):
             s["start_date"] = d
             s["starting_weight_kg"] = round(val, 2)
-            db.set_setting("settings", s)
-        result = _maybe_adapt(s, persist=True)
+            save_user_settings(owner, {"start_date": d, "starting_weight_kg": round(val, 2)})
+        result = _maybe_adapt(s, persist=True, owner=owner)
         return 201, {"logged": {"date": d, "kg": round(val, 2)}, **result}
 
     @staticmethod
     def GET_history(h, q, body):
+        owner = getattr(h, "owner", "default")
         days = int((q.get("days") or ["90"])[0])
         start = (date.today() - __import__("datetime").timedelta(days=days)).isoformat()
         meals = db.query(
             "SELECT date, SUM(calories) c, SUM(protein) p, SUM(carbs) cb, "
-            "SUM(fat) f, COUNT(*) n FROM meals WHERE date >= ? GROUP BY date "
-            "ORDER BY date", (start,))
+            "SUM(fat) f, COUNT(*) n FROM meals WHERE date >= ? AND owner=? GROUP BY date "
+            "ORDER BY date", (start, owner))
         weights = db.query(
-            "SELECT date, value FROM weights WHERE date >= ? ORDER BY date", (start,))
-        bf = db.query("SELECT date, value FROM body_fat WHERE date >= ? ORDER BY date",
-                      (start,))
-        ex = db.query("SELECT date, SUM(calories) c FROM exercises WHERE date >= ? "
-                      "GROUP BY date", (start,))
-        s = get_settings()
+            "SELECT date, value FROM weights WHERE date >= ? AND owner=? ORDER BY date", (start, owner))
+        bf = db.query("SELECT date, value FROM body_fat WHERE date >= ? AND owner=? ORDER BY date",
+                      (start, owner))
+        ex = db.query("SELECT date, SUM(calories) c FROM exercises WHERE date >= ? AND owner=? "
+                      "GROUP BY date", (start, owner))
+        s = get_settings(owner)
         target = s.get("calorie_target") or tdee_from_formula(s) or 2200
         return 200, {
             "days": days, "target": target,
@@ -281,68 +315,71 @@ class Api:
             "weights": [{"date": r["date"], "kg": r["value"]} for r in weights],
             "body_fat": [{"date": r["date"], "pct": r["value"]} for r in bf],
             "exercise": [{"date": r["date"], "calories": round(r["c"] or 0)} for r in ex],
-            "accuracy": accuracy_summary(db),
+            "accuracy": accuracy_summary(db, owner),
         }
 
     @staticmethod
     def POST_exercise(h, q, body):
+        owner = getattr(h, "owner", "default")
         cal = float(body.get("calories") or 0)
         if cal <= 0:
             return 400, {"error": "calories must be > 0"}
         d = body.get("date") or today_str()
-        db.execute("INSERT INTO exercises(ts,date,name,calories) VALUES(?,?,?,?)",
-                   (local_ts_for(d), d, str(body.get("name") or "workout")[:60], cal))
-        return 201, _day_summary(d)
+        db.execute("INSERT INTO exercises(owner,ts,date,name,calories) VALUES(?,?,?,?,?)",
+                   (owner, local_ts_for(d), d, str(body.get("name") or "workout")[:60], cal))
+        return 201, _day_summary(d, owner)
 
     @staticmethod
     def POST_adapt(h, q, body):
-        s = get_settings()
-        res = _maybe_adapt(s, persist=True, force=True)
+        owner = getattr(h, "owner", "default")
+        s = get_settings(owner)
+        res = _maybe_adapt(s, persist=True, force=True, owner=owner)
         return 200, res
 
     # ---- settings ------------------------------------------------------
     @staticmethod
     def GET_settings(h, q, body):
-        s = get_settings()
+        owner = getattr(h, "owner", "default")
+        s = get_settings(owner)
         return 200, {"settings": _public_settings(s),
-                     "accuracy": accuracy_summary(db),
-                     "multipliers": calibration_multipliers(db),
+                     "accuracy": accuracy_summary(db, owner),
+                     "multipliers": calibration_multipliers(db, owner=owner),
                      "has_keys": {k: bool(os.environ.get(k)) for k in
                                   ("GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "QWENPLAN_API_KEY")}}
 
     @staticmethod
     def PUT_settings(h, q, body):
-        cur = db.get_setting("settings", {}) or {}
-        allowed = {"units", "sex", "age", "height_cm", "activity_factor",
-                   "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
-                   "calorie_target", "auto_adapt", "calibrate_estimates",
-                   "providers", "start_date", "starting_weight_kg"}
-        for k, v in body.items():
-            if k in allowed:
-                cur[k] = v
-        # height_cm / weight are always sent canonical (metric) by the UI; the
-        # imperial layer is display-only and never rewrites stored values.
-        db.set_setting("settings", cur)
-        s = get_settings()
+        owner = getattr(h, "owner", "default")
+        # Per-person keys go to the user's own blob; shared keys (providers) stay global.
+        personal = {k: v for k, v in body.items() if k in USER_SETTING_KEYS}
+        shared = {k: v for k, v in body.items() if k == "providers"}
+        if personal:
+            save_user_settings(owner, personal)
+        if shared:
+            cur = db.get_setting("settings", {}) or {}
+            cur.update(shared)
+            db.set_setting("settings", cur)
+        s = get_settings(owner)
         return 200, {"settings": _public_settings(s), "targets": macronutrient_targets(
             s.get("calorie_target") or tdee_from_formula(s) or 2200, s)}
 
     @staticmethod
     def GET_export(h, q, body):
-        """Full data dump as JSON. Secrets are never included."""
-        s = get_settings()
+        """Full data dump as JSON for the current user. Secrets are never included."""
+        owner = getattr(h, "owner", "default")
+        s = get_settings(owner)
         return 200, {
             "exported_at": datetime.now().isoformat(timespec="seconds"),
             "settings": _public_settings(s),
-            "meals": [_meal_dict(m) for m in db.query("SELECT * FROM meals ORDER BY ts")],
-            "weights": [dict(r) for r in db.query("SELECT date,value FROM weights ORDER BY date")],
-            "body_fat": [dict(r) for r in db.query("SELECT date,value FROM body_fat ORDER BY date")],
-            "exercises": [dict(r) for r in db.query("SELECT date,name,calories FROM exercises ORDER BY date")],
+            "meals": [_meal_dict(m) for m in db.query("SELECT * FROM meals WHERE owner=? ORDER BY ts", (owner,))],
+            "weights": [dict(r) for r in db.query("SELECT date,value FROM weights WHERE owner=? ORDER BY date", (owner,))],
+            "body_fat": [dict(r) for r in db.query("SELECT date,value FROM body_fat WHERE owner=? ORDER BY date", (owner,))],
+            "exercises": [dict(r) for r in db.query("SELECT date,name,calories FROM exercises WHERE owner=? ORDER BY date", (owner,))],
             "corrections": [dict(r) for r in db.query(
                 "SELECT m.date, m.description, e.field, e.predicted, e.actual "
-                "FROM estimates e JOIN meals m ON m.id=e.meal_id ORDER BY e.logged_at")],
-            "accuracy": accuracy_summary(db),
-            "multipliers": {f: calibration_multipliers(db, f)
+                "FROM estimates e JOIN meals m ON m.id=e.meal_id WHERE m.owner=? ORDER BY e.logged_at", (owner,))],
+            "accuracy": accuracy_summary(db, owner),
+            "multipliers": {f: calibration_multipliers(db, f, owner=owner)
                             for f in ("calories", "protein", "carbs", "fat")},
         }
 
@@ -464,18 +501,18 @@ def _meal_dict(m) -> dict:
             "photo": os.path.basename(m["photo_path"]) if m["photo_path"] else None}
 
 
-def _exercise_total(d: str) -> float:
-    row = db.one("SELECT SUM(calories) c FROM exercises WHERE date=?", (d,))
+def _exercise_total(d: str, owner: str = "default") -> float:
+    row = db.one("SELECT SUM(calories) c FROM exercises WHERE date=? AND owner=?", (d, owner))
     return round(row["c"] or 0) if row else 0.0
 
 
-def _day_summary(d: str) -> dict:
-    meals = db.meals_for_date(d)
+def _day_summary(d: str, owner: str = "default") -> dict:
+    meals = db.meals_for_date(d, owner)
     return {"date": d, "consumed": {
         k: round(sum(float(m[k]) for m in meals), 1)
         for k in ("calories", "protein", "carbs", "fat")},
         "meals": [_meal_dict(m) for m in meals],
-        "exercise": _exercise_total(d)}
+        "exercise": _exercise_total(d, owner)}
 
 
 def _promote_photo(tmp_path: str) -> str | None:
@@ -494,16 +531,15 @@ def _promote_photo(tmp_path: str) -> str | None:
         return None
 
 
-def _maybe_adapt(settings: dict, persist: bool = False, force: bool = False) -> dict:
+def _maybe_adapt(settings: dict, persist: bool = False, force: bool = False,
+                 owner: str = "default") -> dict:
     """Run the weight->target loop when appropriate; optionally save result."""
     if not (force or settings.get("auto_adapt", True)):
         return {"adapted": False, "reason": "auto-adapt disabled"}
     snapshot = json.loads(json.dumps(settings))
-    res = adapt_targets(db, settings)
+    res = adapt_targets(db, settings, owner=owner)
     if res.get("adjusted") and persist:
-        cur = db.get_setting("settings", {}) or {}
-        cur["calorie_target"] = settings["calorie_target"]
-        db.set_setting("settings", cur)
+        save_user_settings(owner, {"calorie_target": settings["calorie_target"]})
     res["adapted"] = bool(res.get("adjusted"))
     res["targets"] = macronutrient_targets(
         res.get("target") or snapshot.get("calorie_target") or 2200,
@@ -524,12 +560,47 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
 
     # -- helpers ---------------------------------------------------------
+    def _cookies(self) -> dict:
+        raw = self.headers.get("Cookie", "")
+        jar = {}
+        for chunk in raw.split(";"):
+            if "=" in chunk:
+                k, _, v = chunk.strip().partition("=")
+                jar[k] = _urlunquote(v)
+        return jar
+
+    def _base_url(self) -> str:
+        """Externally-visible origin, honoring reverse-proxy headers (Caddy)."""
+        override = os.environ.get("OIDC_REDIRECT_BASE")
+        if override:
+            return override.rstrip("/")
+        proto = self.headers.get("X-Forwarded-Proto", "https" if hasattr(self, "request_version") else "http")
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost"
+        return f"{proto}://{host}"
+
+    def _set_cookie(self, name, value, max_age=None, path="/"):
+        bits = [f"{name}={_urlquote(value)}", f"Path={path}",
+                "HttpOnly", "SameSite=Lax"]
+        if max_age is not None:
+            bits.append(f"Max-Age={max_age}")
+        self._pending_cookies.append("; ".join(bits))
+
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        for c in getattr(self, "_pending_cookies", []):
+            self.send_header("Set-Cookie", c)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _json(self, status, payload):
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for c in getattr(self, "_pending_cookies", []):
+            self.send_header("Set-Cookie", c)
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -604,14 +675,25 @@ class Handler(BaseHTTPRequestHandler):
         return fields, upload
 
     # -- routing ---------------------------------------------------------
+    def _begin(self):
+        self._pending_cookies = []
+
     def do_GET(self):
+        self._begin()
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path.startswith("/auth/"):
+            return self._auth(u.path, q)
         if u.path.startswith("/api/"):
             return self._route("GET", u.path, q, {})
+        # Unauthenticated users hitting the app root get bounced to login when
+        # OIDC is on; otherwise serve the SPA.
+        if u.path in ("/", "") and OIDC.enabled() and not self._owner():
+            return self._redirect("/auth/login")
         return self._static(u.path)
 
     def do_POST(self):
+        self._begin()
         u = urlparse(self.path)
         body, err = self._read_body()
         if err:
@@ -628,14 +710,70 @@ class Handler(BaseHTTPRequestHandler):
         return self._write("DELETE")
 
     def _write(self, verb):
+        self._begin()
         u = urlparse(self.path)
         body, err = self._read_body()
         if err:
             return self._json(400, {"error": err})
         return self._route(verb, u.path, parse_qs(u.query), body or {})
 
+    # -- authentication --------------------------------------------------
+    def _owner(self) -> str | None:
+        """Resolved owner key for this request: OIDC subject, or 'default' when
+        auth is disabled. Returns None if auth is on but no valid session."""
+        if not OIDC.enabled():
+            return "default"
+        sess = OIDC.read_session_cookie(self._cookies().get(SESSION_COOKIE))
+        return sess["sub"] if sess else None
+
+    def _auth(self, path, q):
+        base = self._base_url()
+        if path == "/auth/login":
+            if not OIDC.enabled():
+                return self._redirect("/")
+            nxt = (q.get("next") or ["/"])[0]
+            if not nxt.startswith("/"):        # only allow same-origin paths
+                nxt = "/"
+            url, meta = OIDC.build_login_url(base, redirect_after=nxt)
+            self._set_cookie(STATE_COOKIE, meta["state"], max_age=600)
+            return self._redirect(url)
+        if path == "/auth/callback":
+            flat = {k: v[0] for k, v in q.items()}
+            expected = self._cookies().get(STATE_COOKIE)
+            try:
+                user, after = OIDC.complete_login(base, flat, expected)
+            except OIDC.AuthError as e:
+                return self._json(400, {"error": f"login failed: {e}"})
+            db.upsert_user(user["subject"], user.get("email"),
+                           user.get("name"), user.get("picture"))
+            self._set_cookie(SESSION_COOKIE, OIDC.make_session_cookie(user),
+                             max_age=7 * 86400)
+            self._set_cookie(STATE_COOKIE, "", max_age=0)   # clear state cookie
+            return self._redirect(after if str(after).startswith("/") else "/")
+        if path == "/auth/logout":
+            self._set_cookie(SESSION_COOKIE, "", max_age=0)
+            body = b'<html><body style="font-family:sans-serif;background:#0f1115;color:#e8eaf0;text-align:center;padding-top:20vh">Signed out.<p><a href="/auth/login" style="color:#4ade80">Log back in</a></p></body></html>'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            for c in self._pending_cookies:
+                self.send_header("Set-Cookie", c)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        return self._json(404, {"error": "unknown auth route"})
+
     def _route(self, verb, path, q, body):
         parts = [p for p in path.strip("/").split("/") if p]
+        # Enforce auth on all API endpoints (except none today) when enabled.
+        owner = self._owner()
+        if OIDC.enabled() and owner is None:
+            return self._json(401, {"error": "authentication required",
+                                    "login": "/auth/login"})
+        self.owner = owner or "default"
+        sess = OIDC.read_session_cookie(self._cookies().get(SESSION_COOKIE)) if OIDC.enabled() else None
+        self.user = ({"email": sess.get("email"), "name": sess.get("name")}
+                     if sess else None)
         try:
             if len(parts) < 2:
                 return self._json(404, {"error": "unknown endpoint"})

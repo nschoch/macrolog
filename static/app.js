@@ -63,6 +63,11 @@ async function api(path, opts = {}) {
   const res = await fetch('/api/' + path, opts);
   let data = {};
   try { data = await res.json(); } catch (_) { /* empty body */ }
+  if (res.status === 401 && data.login) {
+    // Session missing/expired: bounce to OIDC login, preserving current view.
+    window.location.assign(data.login + '?next=' + encodeURIComponent(location.pathname));
+    throw new Error('signing in…');
+  }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -95,7 +100,20 @@ $('tabs').addEventListener('click', (e) => {
 });
 
 // --------------------------------------------------------------- today view
+function renderUserChip(s) {
+  const chip = $('user-chip');
+  if (!chip) return;
+  if (s.auth_enabled && s.user) {
+    chip.hidden = false;
+    chip.textContent = (s.user.name || s.user.email || 'account').split(' ')[0].slice(0, 12);
+    chip.title = `${s.user.email || s.user.name} · tap to sign out`;
+  } else {
+    chip.hidden = true;
+  }
+}
+
 function renderToday(s) {
+  renderUserChip(s);
   const c = s.consumed, t = s.targets;
   const exercise = s.exercise || 0;
   const remaining = t.calories - c.calories + exercise;

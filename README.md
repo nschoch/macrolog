@@ -76,6 +76,31 @@ Providers are tried top-to-bottom; the first with a working key wins. With **no
 key at all** the app still runs on an offline placeholder estimator, so you can
 evaluate the whole UX before wiring anything up.
 
+### Optional: sign-in with OIDC (Pocket ID / Authelia / Authentik)
+
+By default MacroLog is single-user with no login. To gate it behind your identity
+provider and give each family member their own private log, set in `.env`:
+
+```bash
+OIDC_ISSUER=https://auth.yourdomain.com      # provider root; discovery is auto
+OIDC_CLIENT_ID=<from Pocket ID client>
+OIDC_CLIENT_SECRET=***                      # optional for PKCE public clients
+# pip install cryptography   # required for RS256 id_token verification
+```
+
+Then create an OIDC client in Pocket ID (**Administration → OIDC Clients**) with
+redirect URI `https://your-macrolog-host/auth/callback` and scopes
+`openid profile email`. Restart MacroLog — unauthenticated visits now redirect to
+Pocket ID, and after passkey login each user's meals, weights, targets and
+calibration history are stored separately (keyed by their OIDC `sub`).
+
+Security notes: the flow is Authorization Code + PKCE with state + nonce; ID
+tokens are signature-verified and fail **closed** if `cryptography` is missing.
+Set `OIDC_ALLOWED_EMAILS=a@x.com,b@y.com` to restrict who may enter; leave blank
+to admit anyone your Pocket ID authenticates. Behind Caddy, `X-Forwarded-Proto`
+is honored automatically; set `OIDC_REDIRECT_BASE` only if you see a
+redirect_uri mismatch. Disable auth entirely by clearing `OIDC_ISSUER`.
+
 ---
 
 ## Deploying to a Proxmox LXC (or any Debian box)

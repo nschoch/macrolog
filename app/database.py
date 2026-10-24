@@ -18,7 +18,18 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject     TEXT    NOT NULL UNIQUE,   -- OIDC 'sub' claim (stable user id)
+    email       TEXT,
+    name        TEXT,
+    picture     TEXT,
+    created_at  INTEGER NOT NULL,
+    last_login  INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS meals (
+    owner         TEXT    NOT NULL DEFAULT 'default',  -- users.subject or 'default'
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            INTEGER NOT NULL,            -- epoch seconds (local log time)
     date          TEXT    NOT NULL,            -- YYYY-MM-DD, derived from ts
@@ -37,32 +48,36 @@ CREATE TABLE IF NOT EXISTS meals (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_meals_date ON meals(date);
+CREATE INDEX IF NOT EXISTS idx_meals_owner ON meals(owner, date);
 
 CREATE TABLE IF NOT EXISTS weights (
+    owner   TEXT    NOT NULL DEFAULT 'default',
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     ts      INTEGER NOT NULL,
     date    TEXT    NOT NULL,
     value   REAL    NOT NULL,
     source  TEXT    NOT NULL DEFAULT 'manual'
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_date ON weights(date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_date ON weights(owner, date);
 
 CREATE TABLE IF NOT EXISTS body_fat (
+    owner  TEXT    NOT NULL DEFAULT 'default',
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     INTEGER NOT NULL,
     date   TEXT    NOT NULL,
     value  REAL    NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_date ON body_fat(date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_date ON body_fat(owner, date);
 
 CREATE TABLE IF NOT EXISTS exercises (
+    owner         TEXT    NOT NULL DEFAULT 'default',
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          INTEGER NOT NULL,
     date        TEXT    NOT NULL,
     name        TEXT    NOT NULL,
     calories    REAL    NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_ex_date ON exercises(date);
+CREATE INDEX IF NOT EXISTS idx_ex_date ON exercises(owner, date);
 
 CREATE TABLE IF NOT EXISTS estimates (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +103,55 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys=ON")
         with _WRITE_LOCK:
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self):
+        """Idempotent upgrades for databases created before per-user scoping.
+
+        CREATE TABLE IF NOT EXISTS won't add columns to existing tables, so we
+        detect and ALTER. Safe to run every startup.
+        """
+        has_owner = {}
+        for tbl in ("meals", "weights", "body_fat", "exercises"):
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({tbl})")}
+            has_owner[tbl] = "owner" in cols
+            if not has_owner[tbl]:
+                self._conn.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN owner TEXT NOT NULL DEFAULT 'default'")
+        # Recreate the two unique indexes that must now include owner.
+        if not has_owner["weights"]:
+            self._conn.execute("DROP INDEX IF EXISTS idx_weights_date")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_date ON weights(owner, date)")
+        if not has_owner["body_fat"]:
+            self._conn.execute("DROP INDEX IF EXISTS idx_bf_date")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_date ON body_fat(owner, date)")
+        if not has_owner["meals"]:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_meals_owner ON meals(owner, date)")
+        if not has_owner["exercises"]:
+            self._conn.execute("DROP INDEX IF EXISTS idx_ex_date")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ex_date ON exercises(owner, date)")
+
+    # -- users -----------------------------------------------------------
+    def upsert_user(self, subject: str, email=None, name=None, picture=None) -> dict:
+        now = int(time.time())
+        self.execute(
+            "INSERT INTO users(subject,email,name,picture,created_at,last_login) "
+            "VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(subject) DO UPDATE SET "
+            "email=COALESCE(excluded.email,email), name=COALESCE(excluded.name,name), "
+            "picture=COALESCE(excluded.picture,picture), last_login=excluded.last_login",
+            (subject, email, name, picture, now, now))
+        row = self.one("SELECT * FROM users WHERE subject=?", (subject,))
+        return dict(row) if row else {"subject": subject}
+
+    def get_user(self, subject: str):
+        row = self.one("SELECT * FROM users WHERE subject=?", (subject,))
+        return dict(row) if row else None
 
     # -- helpers ---------------------------------------------------------
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -131,48 +194,52 @@ class Database:
     def add_meal(self, *, date: str, ts: int, kind: str, description: str,
                  calories: float, protein: float, carbs: float, fat: float,
                  confidence: float, photo_path, source: str,
-                 provider: str, model: str, raw_json: str) -> int:
+                 provider: str, model: str, raw_json: str,
+                 owner: str = "default") -> int:
         return self.execute(
-            "INSERT INTO meals(ts,date,kind,description,calories,protein,carbs,fat,"
+            "INSERT INTO meals(owner,ts,date,kind,description,calories,protein,carbs,fat,"
             "confidence,photo_path,source,provider,model,raw_json,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ts, date, kind, description, calories, protein, carbs, fat,
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (owner, ts, date, kind, description, calories, protein, carbs, fat,
              confidence, photo_path, source, provider, model, raw_json,
              int(time.time())),
         )
 
-    def update_meal(self, meal_id: int, **fields) -> None:
+    def update_meal(self, meal_id: int, owner: str = "default", **fields) -> None:
         allowed = {"kind", "description", "calories", "protein", "carbs", "fat"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
         cols = ",".join(f"{k}=?" for k in sets)
-        self.execute(f"UPDATE meals SET {cols} WHERE id=?",
-                     (*sets.values(), meal_id))
+        self.execute(f"UPDATE meals SET {cols} WHERE id=? AND owner=?",
+                     (*sets.values(), meal_id, owner))
 
-    def delete_meal(self, meal_id: int) -> sqlite3.Row | None:
-        row = self.one("SELECT * FROM meals WHERE id=?", (meal_id,))
+    def get_meal(self, meal_id: int, owner: str = "default"):
+        return self.one("SELECT * FROM meals WHERE id=? AND owner=?", (meal_id, owner))
+
+    def delete_meal(self, meal_id: int, owner: str = "default") -> sqlite3.Row | None:
+        row = self.get_meal(meal_id, owner)
         if row:
             self.execute("DELETE FROM estimates WHERE meal_id=?", (meal_id,))
-            self.execute("DELETE FROM meals WHERE id=?", (meal_id,))
+            self.execute("DELETE FROM meals WHERE id=? AND owner=?", (meal_id, owner))
         return row
 
-    def meals_for_date(self, date: str) -> list[sqlite3.Row]:
+    def meals_for_date(self, date: str, owner: str = "default") -> list[sqlite3.Row]:
         return self.query(
-            "SELECT * FROM meals WHERE date=? ORDER BY ts", (date,))
+            "SELECT * FROM meals WHERE date=? AND owner=? ORDER BY ts", (date, owner))
 
     # -- weights ---------------------------------------------------------
-    def set_weight(self, date: str, ts: int, value: float) -> None:
+    def set_weight(self, date: str, ts: int, value: float, owner: str = "default") -> None:
         self.execute(
-            "INSERT INTO weights(ts,date,value) VALUES(?,?,?) "
-            "ON CONFLICT(date) DO UPDATE SET value=excluded.value, ts=excluded.ts",
-            (ts, date, value))
+            "INSERT INTO weights(owner,ts,date,value) VALUES(?,?,?,?) "
+            "ON CONFLICT(owner,date) DO UPDATE SET value=excluded.value, ts=excluded.ts",
+            (owner, ts, date, value))
 
-    def set_body_fat(self, date: str, ts: int, value: float) -> None:
+    def set_body_fat(self, date: str, ts: int, value: float, owner: str = "default") -> None:
         self.execute(
-            "INSERT INTO body_fat(ts,date,value) VALUES(?,?,?) "
-            "ON CONFLICT(date) DO UPDATE SET value=excluded.value, ts=excluded.ts",
-            (ts, date, value))
+            "INSERT INTO body_fat(owner,ts,date,value) VALUES(?,?,?,?) "
+            "ON CONFLICT(owner,date) DO UPDATE SET value=excluded.value, ts=excluded.ts",
+            (owner, ts, date, value))
 
     def close(self):
         self._conn.close()

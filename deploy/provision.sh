@@ -54,6 +54,15 @@ python3 -m venv "$APP_DIR/.venv" 2>/dev/null || true
   && log "Pillow installed (venv)" \
   || warn "Pillow install skipped; app still works without it"
 
+# cryptography is required only when OIDC login is enabled (RS256 id_token
+# verification). Install best-effort; the app fails closed if it's absent.
+if [[ -n "${OIDC_ISSUER:-}" ]] || grep -q '^OIDC_ISSUER=..*' "$APP_DIR/.env" 2>/dev/null; then
+  log "OIDC appears configured — installing cryptography for token verification"
+  "$APP_DIR/.venv/bin/pip" install --quiet cryptography 2>/dev/null \
+    && log "cryptography installed" \
+    || warn "cryptography install failed; OIDC login will refuse tokens until fixed"
+fi
+
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 chmod 700 "$APP_DIR/data"
 

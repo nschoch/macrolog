@@ -168,7 +168,7 @@ def macronutrient_targets(calorie_target: float, settings: dict) -> dict:
             "carbs": carbs_g, "fat": fat_g}
 
 
-def adapt_targets(db, settings: dict, today=None) -> dict:
+def adapt_targets(db, settings: dict, today=None, owner: str = "default") -> dict:
     """Core loop: reconcile logged intake against observed weight change.
 
     Reads the rolling weight trend plus recent average logged intake, then
@@ -185,8 +185,8 @@ def adapt_targets(db, settings: dict, today=None) -> dict:
             pass
 
     rows = db.query(
-        "SELECT date, value FROM weights WHERE date <= ? ORDER BY date",
-        (today.isoformat(),))
+        "SELECT date, value FROM weights WHERE date <= ? AND owner=? ORDER BY date",
+        (today.isoformat(), owner))
     trend = weight_trend(rows)
 
     # Average logged intake over the same window the weight slope uses, so the
@@ -195,8 +195,8 @@ def adapt_targets(db, settings: dict, today=None) -> dict:
     avg = db.one(
         "SELECT AVG(day_total) a, COUNT(*) d FROM ("
         "  SELECT date, SUM(calories) day_total FROM meals"
-        "  WHERE date > ? AND date <= ? GROUP BY date)",
-        ((today - timedelta(days=TREND_WINDOW_DAYS)).isoformat(), today.isoformat()))
+        "  WHERE date > ? AND date <= ? AND owner=? GROUP BY date)",
+        ((today - timedelta(days=TREND_WINDOW_DAYS)).isoformat(), today.isoformat(), owner))
     logged_avg = avg["a"] if avg else None
     logged_days = int(avg["d"]) if avg else 0
 
@@ -264,12 +264,14 @@ def adapt_targets(db, settings: dict, today=None) -> dict:
 
 
 # ------------------------------------------------- estimate calibration
-def calibration_multipliers(db, field: str = "calories", min_samples: int = 3) -> dict:
+def calibration_multipliers(db, field: str = "calories", min_samples: int = 3,
+                            owner: str = "default") -> dict:
     """Per-food-group ratio of actual/predicted, shrunk toward 1.0."""
     rows = db.query(
         "SELECT m.description, m.kind, e.predicted, e.actual "
-        "FROM estimates e JOIN meals m ON m.id = e.meal_id WHERE e.field = ?",
-        (field,))
+        "FROM estimates e JOIN meals m ON m.id = e.meal_id "
+        "WHERE e.field = ? AND m.owner = ?",
+        (field, owner))
     buckets = {}
     for r in rows:
         if not r["predicted"]:
@@ -321,15 +323,17 @@ def apply_calibration(meal: dict, multipliers: dict):
     return adjusted, True
 
 
-def accuracy_summary(db) -> dict:
+def accuracy_summary(db, owner: str = "default") -> dict:
     """How good is the estimator, per field? Drives the UI trust badge."""
     out = {}
     for field in ("calories", "protein", "carbs", "fat"):
         rows = db.query(
-            "SELECT rel_error, (actual-predicted)/predicted AS s FROM estimates "
-            "WHERE field=? AND predicted>0 ORDER BY logged_at DESC LIMIT 50",
-            (field,))
-        errs = [r["rel_error"] for r in rows]
+            "SELECT e.rel_error AS rel, (e.actual-e.predicted)/e.predicted AS s "
+            "FROM estimates e JOIN meals m ON m.id=e.meal_id "
+            "WHERE e.field=? AND e.predicted>0 AND m.owner=? "
+            "ORDER BY e.logged_at DESC LIMIT 50",
+            (field, owner))
+        errs = [r["rel"] for r in rows]
         if not errs:
             out[field] = {"n": 0, "mape": None, "bias": None}
             continue
