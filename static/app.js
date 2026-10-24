@@ -624,22 +624,20 @@ $('s-units').addEventListener('change', () => {
   renderSettings();
 });
 
+// "auto"/"locked" button toggles whether the calorie target is user-pinned or
+// left for the adaptive engine to manage. One PUT, no round-trips.
 $('btn-unlock').addEventListener('click', async () => {
   const s = state.settings || {};
+  const currentlyLocked = !!s.calorie_target;
   try {
     await api('settings', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ calorie_target: s.calorie_target ? null : Math.round(s.calorie_target || 2200) }),
+      // Unlock -> clear the pin (server recomputes); lock -> pin current value.
+      body: JSON.stringify({ calorie_target: currentlyLocked ? null : (s.calorie_target || 2200) }),
     });
-    if (s.calorie_target) {
-      const cur = await api('settings');
-      await api('settings', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ calorie_target: null }),
-      });
-    }
+    toast(currentlyLocked ? 'Target set to auto' : 'Target locked');
     await refresh();
-    renderSettings();
+    if ($('view-settings').classList.contains('active')) renderSettings();
   } catch (err) { toast(err.message, true); }
 });
 
