@@ -955,9 +955,12 @@ class Handler(BaseHTTPRequestHandler):
         # never serve old JS/CSS after a deploy — the browser sees a new URL and
         # refetches. Token is the app.js mtime (changes on every code push).
         if full.endswith("index.html"):
-            token = str(int(os.path.getmtime(os.path.join(STATIC_DIR, "app.js"))))
-            data = (data.replace(b'href="/app.css"', b'href="/app.css?v=' + token.encode())
-                        .replace(b'src="/app.js"', b'src="/app.js?v=' + token.encode()))
+            token = str(int(os.path.getmtime(os.path.join(STATIC_DIR, "app.js")))).encode()
+            # Replace only the URL portion, keeping the HTML attribute's closing
+            # quote intact — an earlier version swallowed it and broke both tags.
+            data = re.sub(rb'(?:href|src)="/app\.(?:css|js)"',
+                          lambda m: m.group(0)[:-1] + b'?v=' + token + b'"',
+                          data)
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))

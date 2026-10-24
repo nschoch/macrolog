@@ -676,7 +676,9 @@ function renderSettings() {
   // Weekly goal: stored kg/wk; show lb when imperial (with a finer step).
   const rateKg = s.weekly_rate_kg ?? -0.5;
   $('s-rate').value = imp ? +(U.kgToLb(rateKg)).toFixed(1) : rateKg;
-  $('s-rate-label').textContent = imp ? 'Weekly change (lb)' : 'Weekly change (kg)';
+  // Update only the label's text node — assigning .textContent on the <label>
+  // would wipe out the nested <input id="s-rate"> it wraps.
+  $('s-rate-label').firstChild.textContent = imp ? 'Weekly change (lb)' : 'Weekly change (kg)';
   $('s-rate').step = imp ? '0.2' : '0.05';
   $('s-rate').min = imp ? '-3.3' : '-1.5';
   $('s-rate').max = imp ? '2.2' : '1';
