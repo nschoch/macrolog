@@ -84,14 +84,20 @@ systemctl --no-pager --lines=0 status macrolog || true
 HOSTIP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<EOF
 
-  MacroLog is running.
-    This host:   http://$HOSTIP:$PORT
-    From phone:  http://<lxc-netbird-ip>:$PORT   (over your Netbird tailnet)
-    Local test:  http://127.0.0.1:$PORT
+  MacroLog is running (bound to 127.0.0.1:$PORT, plain HTTP).
 
-  Add a vision key, then restart:
-    nano $APP_DIR/.env        # set GROQ_API_KEY=***
-    systemctl restart macrolog
+    Local test:  curl http://127.0.0.1:$PORT/api/state
+    This host IP ($HOSTIP) is only relevant if you set MACROLOG_HOST=0.0.0.0
+    so a remote Caddy can reach it. By default put Caddy in front for HTTPS:
+
+      deploy/Caddyfile.snippet   -> reverse_proxy 127.0.0.1:$PORT
+      then caddy reload
+
+    iPhone reaches it at your Caddy hostname over HTTPS (camera works there).
+
+  Vision key: $APP_DIR/.env should already define QWENPLAN_API_KEY / _BASE_URL.
+    If empty, add one (Qwen/Groq/Gemini/OpenAI/Ollama), then:
+      systemctl restart macrolog
 
   Logs:          journalctl -u macrolog -f
   Backup:        copy $APP_DIR/data  (one sqlite file + photos/)

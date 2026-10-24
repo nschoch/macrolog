@@ -1,0 +1,63 @@
+# Caddy reverse proxy for MacroLog
+# ================================
+# You said Caddy already handles HTTPS on your network, so this file just maps
+# your chosen hostname -> the MacroLog app server. Copy the relevant block into
+# your existing Caddyfile (usually /etc/caddy/Caddyfile) and `caddy reload`.
+
+# ---------------------------------------------------------------------------
+# OPTION A — same host as Caddy (app bound to 127.0.0.1:8765)
+# ---------------------------------------------------------------------------
+macrolog.example.com {
+	# Real TLS via Caddy's normal cert automation (DNS challenge or HTTP-01).
+	# iPhone camera works immediately; no manual cert trust needed.
+
+	encode zstd gzip
+
+	# Large meal photos: raise the request body ceiling above Caddy's default.
+	request_body {
+		max_size 25MB
+	}
+
+	reverse_proxy 127.0.0.1:8765 {
+		header_up Host {upstream_hostport}
+	}
+}
+
+# ---------------------------------------------------------------------------
+# OPTION B — Caddy and MacroLog are DIFFERENT machines/LXCs (Netbird/tailnet)
+# ---------------------------------------------------------------------------
+# Replace 127.0.0.1 with the LXC's Netbird IP, and in macrolog.service set
+# MACROLOG_HOST=0.0.0.0 (then firewall 8765 to allow only the Caddy node):
+#
+#   reverse_proxy 100.64.x.x:8765
+
+
+# ---------------------------------------------------------------------------
+# OPTION C — internal-only name resolved by your own DNS + Caddy internal CA
+# ---------------------------------------------------------------------------
+# If "macrolog.home" resolves on your LAN/Netbird and you want Caddy's built-in
+# local CA (no public DNS, still trusted by devices that install the root):
+#
+# macrolog.home {
+#     tls internal
+#     request_body { max_size 25MB }
+#     reverse_proxy 127.0.0.1:8765
+# }
+#
+# On iOS, export Caddy's root CA (~/Library/Application Support/Caddy/pki/authorities/local/root.crt
+# on macOS, or /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt on Linux),
+# AirDrop it to the phone, Settings > Install Profile, then enable it under
+# Settings > General > About > Certificate Trust Settings. After that Safari
+# treats https://macrolog.home as fully valid and the camera prompt appears.
+
+
+# ---------------------------------------------------------------------------
+# Notes
+# ---------------------------------------------------------------------------
+# * The app speaks plain HTTP and uses only relative URLs, so no scheme/host
+#   rewriting is required. X-Forwarded-* headers are handled if you add them but
+#   the app does not depend on them.
+# * No auth is built into MacroLog (single-user design). Put Caddy's auth, a
+#   tailnet restriction, or Netbird ACLs in front if the hostname could ever be
+#   reachable beyond your devices.
+# * Health check once live:  curl -sS https://macrolog.example.com/api/state | head

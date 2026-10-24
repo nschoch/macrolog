@@ -1,5 +1,6 @@
 [Unit]
 Description=MacroLog self-hosted calorie tracker
+Documentation=https://github.com/nschoch/macrolog
 After=network-online.target
 Wants=network-online.target
 
@@ -10,9 +11,13 @@ User=macrolog
 Group=macrolog
 WorkingDirectory=/opt/macrolog
 
-# Secrets and provider keys live here (chmod 600, owned by the service user).
+# Secrets + provider keys live here (chmod 600, owned by the service user).
 EnvironmentFile=-/opt/macrolog/.env
-Environment=MACROLOG_HOST=0.0.0.0
+
+# Behind Caddy: bind loopback only so nothing bypasses the proxy's TLS/auth.
+# If Caddy runs on ANOTHER host/container, set MACROLOG_HOST=0.0.0.0 and firewall
+# port 8765 to allow only the Caddy host instead.
+Environment=MACROLOG_HOST=127.0.0.1
 Environment=MACROLOG_PORT=8765
 Environment=MACROLOG_DATA=/opt/macrolog/data
 

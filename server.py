@@ -741,6 +741,10 @@ def main():
     ap = argparse.ArgumentParser(description="MacroLog self-hosted calorie tracker")
     ap.add_argument("--host", default=os.environ.get("MACROLOG_HOST", "127.0.0.1"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("MACROLOG_PORT", 8765)))
+    ap.add_argument("--tls-cert", default=os.environ.get("MACROLOG_TLS_CERT"),
+                    help="PEM cert; enables HTTPS (required for iPhone camera over LAN)")
+    ap.add_argument("--tls-key", default=os.environ.get("MACROLOG_TLS_KEY"),
+                    help="PEM private key matching --tls-cert")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
@@ -750,17 +754,33 @@ def main():
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
 
+    use_tls = bool(args.tls_cert and args.tls_key)
+    if use_tls:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=args.tls_cert, keyfile=args.tls_key)
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        except (AttributeError, ValueError):
+            pass
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    elif args.tls_cert or args.tls_key:
+        print("  ! both --tls-cert and --tls-key are required for HTTPS; running plain HTTP")
+
+    scheme = "https" if use_tls else "http"
     shown = "localhost" if args.host in ("0.0.0.0", "::") else args.host
-    print(f"\n  MacroLog  ->  http://{shown}:{args.port}")
+    print(f"\n  MacroLog  ->  {scheme}://{shown}:{args.port}")
     if args.host == "0.0.0.0":
         for ip in lan_ips():
-            print(f"              http://{ip}:{args.port}   (phone, same network)")
+            print(f"              {scheme}://{ip}:{args.port}   (phone, same network)")
     s = get_settings()
     ready = [p["kind"] for p in s.get("providers", [])
              if os.environ.get({"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
                                 "groq": "GROQ_API_KEY",
                                 "qwenplan": "QWENPLAN_API_KEY"}.get(p["kind"], ""))]
     print(f"  vision:   {', '.join(ready) if ready else 'NONE - running offline stub'}")
+    if use_tls:
+        print("  tls:      on (HTTPS — iPhone camera will work)")
     print("  Ctrl-C to stop\n")
     try:
         httpd.serve_forever()

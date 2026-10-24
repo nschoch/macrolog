@@ -87,19 +87,39 @@ sudo bash deploy/provision.sh
 ```
 
 It creates a `macrolog` service user, copies the app to `/opt/macrolog`, writes a
-hardened systemd unit, and starts it bound to `0.0.0.0:8765`. Reach it from your
-phone over Netbird at `http://<lxc-tailnet-ip>:8765`.
+hardened systemd unit, and starts it bound to **`127.0.0.1:8765`** over plain HTTP.
 
-Or with Docker:
+### Putting it behind Caddy (recommended — needed for iPhone camera)
+
+iOS only allows camera access on HTTPS, so front the app with your existing
+Caddy using [`deploy/Caddyfile.snippet`](deploy/Caddyfile.snippet):
+
+```caddy
+macrolog.example.com {
+    request_body { max_size 25MB }
+    reverse_proxy 127.0.0.1:8765
+}
+```
+
+Then `caddy reload`. If Caddy runs on a different machine than the LXC, set
+`MACROLOG_HOST=0.0.0.0` in the unit and point `reverse_proxy` at the LXC's IP
+(see Option B in the snippet). Full phone-trust walkthrough (ACME vs Caddy's
+internal CA): [`deploy/IPHONE_TRUST.md`](deploy/IPHONE_TRUST.md).
+
+The app uses only relative URLs and no auth, so it sits cleanly behind any
+reverse proxy — just keep it off the public internet (single-user by design;
+restrict via Caddy auth, Netbird ACLs, or a firewall).
+
+### Or with Docker
 
 ```bash
 docker build -t macrolog .
 docker run -d --name macrolog -p 8765:8765 -v $(pwd)/data:/data macrolog
 ```
 
-Keep the API off the public internet — it has no auth by design (single-user,
-LAN/tailnet only). Put Netbird, Tailscale, or an authenticated reverse proxy in
-front if it must be reachable remotely.
+Prefer no proxy? The server can also terminate TLS itself:
+`--tls-cert tls/macrolog.crt --tls-key tls/macrolog.key`
+(generate with `deploy/make-cert.sh <ip> <host> ...`).
 
 ---
 
