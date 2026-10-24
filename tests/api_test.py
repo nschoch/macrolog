@@ -110,6 +110,16 @@ check("exercise logged", st == 201 and ex.get("exercise", 0) >= 400 or ex.get("c
 st, sv = req("/api/settings", "PUT", {"weekly_rate_kg": -0.75, "protein_g_per_kg": 2.0})
 check("settings saved", st == 200 and sv.get("settings", {}).get("weekly_rate_kg") == -0.75, str(sv)[:120])
 
+# 8b. REGRESSION: body-profile settings must PERSIST across a fresh state read
+#     (guards the OIDC per-user migration bug where saved prefs reverted to defaults).
+req("/api/settings", "PUT", {"units": "imperial", "age": 41, "height_cm": 183, "activity_factor": 1.35})
+st, s2 = req("/api/state")
+p = s2.get("settings", {})
+check("units persist after save+reload", p.get("units") == "imperial", str(p.get("units")))
+check("age persists after save+reload", p.get("age") == 41, str(p.get("age")))
+check("height persists after save+reload", p.get("height_cm") == 183, str(p.get("height_cm")))
+check("profile-set clears needs_setup nag", s2.get("needs_setup") is False, str(s2.get("needs_setup")))
+
 # 9. export
 st, xp = req("/api/export")
 check("export has meals", st == 200 and len(xp.get("meals", [])) >= 1, str(st))

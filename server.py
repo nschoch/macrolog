@@ -94,7 +94,7 @@ def load_env():
 USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
                      "calorie_target", "start_date", "starting_weight_kg",
-                     "auto_adapt", "calibrate_estimates"}
+                     "auto_adapt", "calibrate_estimates", "_profile_set"}
 
 
 def get_settings(owner: str = "default") -> dict:
@@ -167,7 +167,9 @@ class Api:
             "exercise": _exercise_total(t, owner),
             "user": getattr(h, "user", None),
             "auth_enabled": OIDC.enabled(),
-            "needs_setup": not s.get("start_date"),
+            # needs_setup = user hasn't customized their body profile yet (still on
+            # defaults). Distinct from having logged a weight (weights_count).
+            "needs_setup": not s.get("_profile_set"),
             "weights_count": len(rows),
         }
 
@@ -382,6 +384,10 @@ class Api:
         # Per-person keys go to the user's own blob; shared keys (providers) stay global.
         personal = {k: v for k, v in body.items() if k in USER_SETTING_KEYS}
         shared = {k: v for k, v in body.items() if k == "providers"}
+        # Saving any body/goal field marks the profile as configured (clears nag).
+        if personal.get("units") or personal.get("age") or personal.get("height_cm") \
+                or personal.get("sex") or personal.get("activity_factor"):
+            personal["_profile_set"] = True
         if personal:
             save_user_settings(owner, personal)
         if shared:
