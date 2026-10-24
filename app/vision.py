@@ -227,8 +227,11 @@ class OpenAICompatProvider:
             "groq": ("https://api.groq.com/openai/v1", "meta-llama/llama-4-scout-17b-16e-instruct"),
             "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
             # DashScope OpenAI-compatible endpoint; qwen-vl-max is their flagship
-            # multimodal model. Region-specific hosts exist (cn-beijing etc.).
-            "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-vl-max"),
+            # multimodal model. Override region with DASHSCOPE_BASE_URL (e.g. a
+            # token-plan.maas.* host).
+            "qwen": (os.environ.get("DASHSCOPE_BASE_URL")
+                     or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                     os.environ.get("QWEN_VL_MODEL", "qwen-vl-max")),
         }
         base, model = defaults.get(name, ("", "gpt-4o-mini"))
         self.base = (cfg.get("base_url") or base).rstrip("/")
