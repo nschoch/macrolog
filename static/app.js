@@ -6,6 +6,58 @@ const CIRC = 2 * Math.PI * 86;
 let state = null;
 let pendingPhoto = null;   // { temp_photo, dataUrl }
 
+// --------------------------------------------------------------- units layer
+// Canonical storage is metric (kg / cm). Imperial is a pure display + input
+// conversion at the edges, so toggling never rewrites history or the DB.
+const LB_PER_KG = 2.2046226;
+const CM_PER_IN = 2.54;
+
+const U = {
+  get imperial() { return state?.settings?.units === 'imperial'; },
+  kgToLb(kg) { return kg * LB_PER_KG; },
+  lbToKg(lb) { return lb / LB_PER_KG; },
+  // Weight as a formatted string in the active unit ("176.4 lb" / "80.0 kg").
+  weight(kg, withUnit = true) {
+    if (kg == null || isNaN(kg)) return '–';
+    const v = this.imperial ? this.kgToLb(kg) : kg;
+    return v.toFixed(1) + (withUnit ? (this.imperial ? ' lb' : ' kg') : '');
+  },
+  // Weight without decimals for compact stat cards.
+  weightInt(kg) {
+    if (kg == null || isNaN(kg)) return '–';
+    return String(Math.round(this.imperial ? this.kgToLb(kg) : kg));
+  },
+  // Rate of change per week, converted from kg/wk.
+  rate(kgPerWk, withUnit = true) {
+    if (kgPerWk == null || isNaN(kgPerWk)) return '–';
+    const sign = kgPerWk > 0 ? '+' : '';
+    const v = this.imperial ? this.kgToLb(kgPerWk) : kgPerWk;
+    return sign + v.toFixed(this.imperial ? 1 : 2) +
+      (withUnit ? (this.imperial ? ' lb/wk' : ' kg/wk') : '');
+  },
+  // Height: metric shows "178 cm"; imperial shows feet+inches like 5'10".
+  height(cm) {
+    if (cm == null || isNaN(cm)) return '';
+    if (!this.imperial) return Math.round(cm) + ' cm';
+    const totalIn = cm / CM_PER_IN;
+    let ft = Math.floor(totalIn / 12), inch = Math.round(totalIn % 12);
+    if (inch === 12) { ft += 1; inch = 0; }
+    return `${ft}'${inch}"`;
+  },
+  // Parse a height entered in the active unit back to canonical cm.
+  heightToCm(value, inches) {
+    if (this.imperial) {
+      const ft = Number(value) || 0;
+      const ins = Number(inches) || 0;
+      return (ft * 12 + ins) * CM_PER_IN;
+    }
+    return Number(value) || 0;
+  },
+  // Parse a weight entered in the active unit back to canonical kg.
+  weightToKg(value) { return this.imperial ? this.lbToKg(Number(value)) : Number(value); },
+  wUnitLabel() { return this.imperial ? 'lb' : 'kg'; },
+};
+
 // ------------------------------------------------------------------ helpers
 async function api(path, opts = {}) {
   const res = await fetch('/api/' + path, opts);
@@ -82,7 +134,7 @@ function renderStatus(s) {
   const tr = s.trend || {};
   if (tr.reliable && tr.slope_kg_per_week != null) {
     const rate = tr.slope_kg_per_week;
-    bits.push(['ok', `Weight trend: <b>${rate > 0 ? '+' : ''}${rate.toFixed(2)} kg/wk</b> · smoothed <b>${tr.current_kg} kg</b>`]);
+    bits.push(['ok', `Weight trend: <b>${U.rate(rate)}</b> · smoothed <b>${U.weight(tr.current_kg)}</b>`]);
   } else if ((s.weights_count || 0) < 4) {
     bits.push(['', `Log your weight daily — the target adapts after ~${4 - (s.weights_count || 0)} more weigh-ins.`]);
   }
@@ -296,9 +348,10 @@ $('btn-weight').addEventListener('click', async () => {
   const value = Number($('w-value').value);
   if (!value) { toast('Enter a weight first', true); return; }
   try {
+    // Send the raw entry plus its unit; server stores canonical kg.
     const res = await api('weight', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value }),
+      body: JSON.stringify({ value, unit: U.imperial ? 'lb' : 'kg' }),
     });
     $('w-value').value = '';
     toast(res.adapted
@@ -307,6 +360,12 @@ $('btn-weight').addEventListener('click', async () => {
     await refresh();
   } catch (err) { toast(err.message, true); }
 });
+
+// Keep the weight dock placeholder in sync with the active unit.
+function syncWeightDock() {
+  const el = $('w-value');
+  if (el) el.placeholder = `weight (${U.wUnitLabel()})`;
+}
 
 // --------------------------------------------------------------------- trend
 async function loadTrend() {
@@ -329,8 +388,8 @@ function renderTrendStats(h) {
   const avgP = days ? Math.round(h.intake.reduce((a, d) => a + d.protein, 0) / days) : 0;
 
   $('trend-stats').innerHTML = `
-    <div class="stat"><div class="stat-k">Current</div><div class="stat-v">${last != null ? last.toFixed(1) : '–'}</div><div class="stat-s">kg (latest)</div></div>
-    <div class="stat"><div class="stat-k">Change</div><div class="stat-v">${change == null ? '–' : (change > 0 ? '+' : '') + change.toFixed(1)}</div><div class="stat-s">kg over window</div></div>
+    <div class="stat"><div class="stat-k">Current</div><div class="stat-v">${last != null ? U.weightInt(last) : '–'}</div><div class="stat-s">${U.wUnitLabel()} (latest)</div></div>
+    <div class="stat"><div class="stat-k">Change</div><div class="stat-v">${change == null ? '–' : (change > 0 ? '+' : '') + (U.imperial ? U.kgToLb(change).toFixed(1) : change.toFixed(1))}</div><div class="stat-s">${U.wUnitLabel()} over window</div></div>
     <div class="stat"><div class="stat-k">Avg intake</div><div class="stat-v">${avgIn || '–'}</div><div class="stat-s">kcal on ${days} logged days</div></div>
     <div class="stat"><div class="stat-k">Avg protein</div><div class="stat-v">${avgP || '–'}</div><div class="stat-s">g per day</div></div>
     <div class="stat"><div class="stat-k">Target</div><div class="stat-v">${fmt(h.target)}</div><div class="stat-s">kcal/day</div></div>`;
@@ -364,7 +423,9 @@ function prepCanvas(canvas) {
 }
 
 function drawWeightChart(h) {
-  const pts = (h.weights || []).map(r => ({ x: new Date(r.date).getTime(), y: r.kg }));
+  // Plot in the active display unit; data stays canonical kg on the server.
+  const toDisp = (kg) => U.imperial ? U.kgToLb(kg) : kg;
+  const pts = (h.weights || []).map(r => ({ x: new Date(r.date).getTime(), y: toDisp(r.kg) }));
   const { ctx, w, hh } = prepCanvas($('chart-weight'));
   if (pts.length < 2) {
     ctx.fillStyle = '#8b93a5'; ctx.font = '13px sans-serif';
@@ -384,7 +445,7 @@ function drawWeightChart(h) {
   for (let i = 0; i <= 3; i++) {
     const val = lo + (hi - lo) * i / 3, y = sy(val);
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
-    ctx.fillText(val.toFixed(1), 2, y + 3);
+    ctx.fillText(U.imperial ? String(Math.round(val)) : val.toFixed(1), 2, y + 3);
   }
 
   ctx.beginPath();
@@ -401,7 +462,9 @@ function drawWeightChart(h) {
     ctx.moveTo(sx(x0), sy(interceptAt(pts, x0)));
     ctx.lineTo(sx(x1), sy(interceptAt(pts, x1)));
     ctx.stroke(); ctx.setLineDash([]);
-    $('weight-sub').textContent = `${slope > 0 ? '+' : ''}${slope.toFixed(2)} kg/wk`;
+    // slope is already in display-units/week because pts were converted above.
+    const dec = U.imperial ? 1 : 2;
+    $('weight-sub').textContent = `${slope > 0 ? '+' : ''}${slope.toFixed(dec)} ${U.wUnitLabel()}/wk`;
   }
 }
 
@@ -460,17 +523,40 @@ function drawIntakeChart(h) {
 // ------------------------------------------------------------------ settings
 function renderSettings() {
   const s = state.settings || {};
+  const imp = U.imperial;
+  $('s-units').value = imp ? 'imperial' : 'metric';
   $('s-sex').value = s.sex || 'male';
   $('s-age').value = s.age ?? 35;
-  $('s-height').value = s.height_cm ?? 178;
+
+  // Height: metric = one cm field; imperial = feet + inches fields.
+  const cm = s.height_cm ?? 178;
+  if (imp) {
+    const totalIn = Math.round(cm / CM_PER_IN);
+    $('s-height-ft').value = Math.floor(totalIn / 12);
+    $('s-height-in').value = totalIn % 12;
+  } else {
+    $('s-height-cm').value = Math.round(cm);
+  }
+  $('height-metric-field').hidden = imp;
+  $('height-imperial-field').hidden = !imp;
+
   $('s-activity').value = String(s.activity_factor ?? 1.4);
-  $('s-rate').value = s.weekly_rate_kg ?? -0.5;
+
+  // Weekly goal: stored kg/wk; show lb when imperial (with a finer step).
+  const rateKg = s.weekly_rate_kg ?? -0.5;
+  $('s-rate').value = imp ? +(U.kgToLb(rateKg)).toFixed(1) : rateKg;
+  $('s-rate-label').textContent = imp ? 'Weekly change (lb)' : 'Weekly change (kg)';
+  $('s-rate').step = imp ? '0.2' : '0.05';
+  $('s-rate').min = imp ? '-3.3' : '-1.5';
+  $('s-rate').max = imp ? '2.2' : '1';
+
   $('s-protein').value = s.protein_g_per_kg ?? 1.8;
   $('s-fatpct').value = s.fat_calorie_pct ?? 0.25;
   $('s-target').value = s.calorie_target ?? '';
   $('s-autoadapt').checked = s.auto_adapt !== false;
   $('s-calibrate').checked = s.calibrate_estimates !== false;
   $('btn-unlock').textContent = s.calorie_target ? 'locked' : 'auto';
+  syncWeightDock();
 
   $('provider-list').innerHTML = (s.providers || []).map((p, i) => {
     const st = (state.providers || [])[i] || {};
@@ -482,12 +568,19 @@ function renderSettings() {
 }
 
 $('btn-save').addEventListener('click', async () => {
+  const imp = U.imperial;
+  // Convert display-unit inputs back to canonical metric before sending.
+  const height_cm = imp
+    ? U.heightToCm($('s-height-ft').value, $('s-height-in').value)
+    : Number($('s-height-cm').value);
+  const rateShown = Number($('s-rate').value);
   const payload = {
+    units: $('s-units').value,
     sex: $('s-sex').value,
     age: Number($('s-age').value),
-    height_cm: Number($('s-height').value),
+    height_cm: Math.round(height_cm),
     activity_factor: Number($('s-activity').value),
-    weekly_rate_kg: Number($('s-rate').value),
+    weekly_rate_kg: +(imp ? U.lbToKg(rateShown) : rateShown).toFixed(3),
     protein_g_per_kg: Number($('s-protein').value),
     fat_calorie_pct: Number($('s-fatpct').value),
     auto_adapt: $('s-autoadapt').checked,
@@ -502,7 +595,15 @@ $('btn-save').addEventListener('click', async () => {
     });
     toast('Saved');
     await refresh();
+    renderSettings();   // re-render so fields reflect any unit change immediately
   } catch (err) { toast(err.message, true); }
+});
+
+// Switching the units dropdown re-renders the form live (before saving) so the
+// user sees ft/in vs cm and lb vs kg without a round-trip.
+$('s-units').addEventListener('change', () => {
+  state.settings.units = $('s-units').value;
+  renderSettings();
 });
 
 $('btn-unlock').addEventListener('click', async () => {
@@ -541,6 +642,7 @@ async function refresh() {
   try {
     state = await api('state');
     renderToday(state);
+    syncWeightDock();
     if ($('view-settings').classList.contains('active')) renderSettings();
   } catch (err) {
     toast(err.message, true);

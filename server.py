@@ -63,6 +63,10 @@ DEFAULT_SETTINGS = {
 db = Database(DB_PATH)
 _LOG_LOCK = threading.Lock()
 
+# Canonical storage is metric; these convert the imperial presentation edge.
+LB_PER_KG = 2.2046226
+CM_PER_IN = 2.54
+
 
 def load_env():
     """Read KEY=VALUE lines from .env next to the project, without overriding env."""
@@ -232,12 +236,14 @@ class Api:
     # ---- weight / composition -----------------------------------------
     @staticmethod
     def POST_weight(h, q, body):
-        val = float(body.get("value") or 0)
-        if val <= 0 or val > 700:
+        raw = float(body.get("value") or 0)
+        # Trust the unit the CLIENT declared for this value; fall back to the
+        # stored preference only if it omitted one. Never guess silently.
+        unit = str(body.get("unit") or get_settings().get("units", "metric")).lower()
+        val = raw / LB_PER_KG if unit in ("lb", "imperial", "lbs") else raw
+        if val <= 0 or val > 700:      # validated in canonical kg
             return 400, {"error": "weight out of range"}
         d = body.get("date") or today_str()
-        if body.get("unit") == "lb" or get_settings().get("units") == "imperial":
-            val = val / 2.2046226
         db.set_weight(d, local_ts_for(d), round(val, 2))
         if body.get("body_fat") is not None:
             bf = float(body["body_fat"])
@@ -314,8 +320,8 @@ class Api:
         for k, v in body.items():
             if k in allowed:
                 cur[k] = v
-        if "height_cm" in body and str(body.get("units")) == "imperial":
-            pass  # UI converts before sending; store canonical metric
+        # height_cm / weight are always sent canonical (metric) by the UI; the
+        # imperial layer is display-only and never rewrites stored values.
         db.set_setting("settings", cur)
         s = get_settings()
         return 200, {"settings": _public_settings(s), "targets": macronutrient_targets(
