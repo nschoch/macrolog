@@ -951,9 +951,17 @@ class Handler(BaseHTTPRequestHandler):
             mime += "; charset=utf-8"
         with open(full, "rb") as fh:
             data = fh.read()
+        # Stamp asset URLs with a build token so a stale service-worker cache can
+        # never serve old JS/CSS after a deploy — the browser sees a new URL and
+        # refetches. Token is the app.js mtime (changes on every code push).
+        if full.endswith("index.html"):
+            token = str(int(os.path.getmtime(os.path.join(STATIC_DIR, "app.js"))))
+            data = (data.replace(b'href="/app.css"', b'href="/app.css?v=' + token.encode())
+                        .replace(b'src="/app.js"', b'src="/app.js?v=' + token.encode()))
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        # HTML + assets must revalidate every load; photos can cache long.
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         try:
