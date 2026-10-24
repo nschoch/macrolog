@@ -123,6 +123,47 @@ check("delete meal 200", st == 200, str(d)[:100])
 st, _ = req("/api/meals", "POST", {"calories": 0, "description": "empty"})
 check("zero-calorie meal rejected", st == 400, str(st))
 
+# ---- components / items ---------------------------------------------------
+# 12. create a meal WITH components; totals must equal sum of components
+st, m = req("/api/meals", "POST", {
+    "description": "Spaghetti dinner", "kind": "dinner",
+    "date": today_str if False else None,
+    "items": [
+        {"name": "Pasta", "grams": 80, "calories": 280, "protein": 10, "carbs": 56, "fat": 1.5},
+        {"name": "Meatballs", "grams": 120, "calories": 300, "protein": 18, "carbs": 6, "fat": 20},
+        {"name": "Marinara", "grams": 120, "calories": 120, "protein": 3, "carbs": 12, "fat": 6}]})
+check("create meal with components -> 201", st == 201, str(m)[:120])
+comp_mid = m.get("id")
+expect_kcal = 280 + 300 + 120
+saved = next((x for x in m.get("meals", []) if x["id"] == comp_mid), {})
+check("meal total == sum(components)", abs(saved.get("calories", 0) - expect_kcal) < 0.5,
+      f"{saved.get('calories')} vs {expect_kcal}")
+check("components persisted on read-back", len(saved.get("items", [])) == 3, str(len(saved.get("items", []))))
+
+# 13. edit a component's grams -> total recomputes proportionally
+st, u = req(f"/api/meals/{comp_mid}", "PATCH", {"items": [
+    {"name": "Pasta", "grams": 160, "calories": 560, "protein": 20, "carbs": 112, "fat": 3},
+    {"name": "Meatballs", "grams": 120, "calories": 300, "protein": 18, "carbs": 6, "fat": 20},
+    {"name": "Marinara", "grams": 120, "calories": 120, "protein": 3, "carbs": 12, "fat": 6}]})
+new_saved = next((x for x in u.get("meals", []) if x["id"] == comp_mid), {})
+check("component edit recomputes total", abs(new_saved.get("calories", 0) - (560+300+120)) < 0.5,
+      str(new_saved.get("calories")))
+check("edited grams stored", any(i["grams"] == 160 for i in new_saved.get("items", [])), str(new_saved.get("items")))
+
+# 14. date/time editing
+st, u = req(f"/api/meals/{comp_mid}", "PATCH", {"date": "2026-01-15", "time": "07:30"})
+check("date edit accepted", st == 200, str(u)[:80])
+import datetime as _dt
+moved = db_get_meal = None
+# verify via history that the meal now sits on 2026-01-15
+st, hist = req("/api/history?days=400")
+on_day = [d for d in hist.get("intake", []) if d["date"] == "2026-01-15"]
+check("meal moved to edited date", bool(on_day), str([d['date'] for d in hist.get('intake',[])][:5]))
+
+# 15. delete the component meal; its items should cascade away (no orphans)
+st, _ = req(f"/api/meals/{comp_mid}", "DELETE")
+check("delete component meal -> 200", st == 200, str(st))
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))

@@ -174,21 +174,29 @@ function renderMeals(meals) {
     const thumb = m.photo
       ? `<img class="meal-thumb" src="/api/photo/${encodeURIComponent(m.photo)}" alt="" loading="lazy">`
       : `<div class="meal-thumb"></div>`;
-    return `<li class="meal" data-id="${m.id}">
-      ${thumb}
-      <div class="meal-info">
-        <div class="meal-desc">${esc(m.description || m.kind || 'Meal')}</div>
-        <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time} · ${cap(m.kind)}${m.source === 'manual' ? ' · manual' : ''}</div>
+    const comps = (m.items || []);
+    const compHtml = comps.length ? `
+      <ul class="comp-list">${comps.map(c =>
+        `<li><span class="c-name">${esc(c.name || 'item')}</span><span class="c-g">${fmt(c.grams)}g</span><span class="c-k">${fmt(c.calories)}</span></li>`
+      ).join('')}</ul>` : '';
+    return `<li class="meal ${comps.length ? 'has-comps' : ''}" data-id="${m.id}">
+      <div class="meal-row" data-toggle="${m.id}">
+        ${thumb}
+        <div class="meal-info">
+          <div class="meal-desc">${esc(m.description || m.kind || 'Meal')}</div>
+          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time} · ${cap(m.kind)}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} items` : ''}</div>
+        </div>
+        <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
+        <div class="meal-actions">
+          <button class="icon-btn" data-act="edit" aria-label="Edit meal">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L20 8l-4-4L4 16v4z"/></svg>
+          </button>
+          <button class="icon-btn" data-act="del" aria-label="Delete meal">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13"/></svg>
+          </button>
+        </div>
       </div>
-      <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
-      <div class="meal-actions">
-        <button class="icon-btn" data-act="edit" aria-label="Edit meal">
-          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L20 8l-4-4L4 16v4z"/></svg>
-        </button>
-        <button class="icon-btn" data-act="del" aria-label="Delete meal">
-          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13"/></svg>
-        </button>
-      </div>
+      ${compHtml}
     </li>`;
   }).join('');
 }
@@ -219,12 +227,20 @@ $('meal-list').addEventListener('click', async (e) => {
     openReview({
       estimate: {
         description: meal.description, calories: meal.calories,
-        protein: meal.protein, carbs: meal.carbs, fat: meal.fat, items: [],
+        protein: meal.protein, carbs: meal.carbs, fat: meal.fat,
+        items: meal.items || [], ts: meal.ts, date: meal.date,
       },
       provider: meal.provider, model: meal.model, editingId: id,
       photoUrl: meal.photo ? `/api/photo/${encodeURIComponent(meal.photo)}` : null,
     });
   }
+});
+
+// Tap a meal row (not its action buttons) to expand/collapse the breakdown.
+$('meal-list').addEventListener('click', (e) => {
+  if (e.target.closest('[data-act]')) return;
+  const head = e.target.closest('.meal-row'); if (!head) return;
+  head.parentElement.classList.toggle('open');
 });
 
 // ------------------------------------------------------------------- capture
@@ -261,14 +277,81 @@ function readAsDataURL(file) {
 }
 
 // ------------------------------------------------------------ review sheet
+let compItems = [];        // live editable components for the open meal
+
+function nowHM() { const d = new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
+function todayISO() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+
+// Recompute a component's macros from grams, preserving per-gram density.
+function rescaleItem(it, newGrams) {
+  if (!it.grams || it.grams <= 0 || newGrams === it.grams) { it.grams = newGrams; return it; }
+  const k = newGrams / it.grams;
+  it.grams = newGrams;
+  it.calories = +(it.calories * k).toFixed(1);
+  it.protein = +(it.protein * k).toFixed(1);
+  it.carbs = +(it.carbs * k).toFixed(1);
+  it.fat = +(it.fat * k).toFixed(1);
+  return it;
+}
+
+function sumComps() {
+  return compItems.reduce((a, i) => ({
+    calories: a.calories + (+i.calories || 0), protein: a.protein + (+i.protein || 0),
+    carbs: a.carbs + (+i.carbs || 0), fat: a.fat + (+i.fat || 0),
+  }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+}
+
+function refreshTotals() {
+  const hasComps = compItems.length > 0;
+  const t = sumComps();
+  $('r-total-shown').textContent = `${fmt(t.calories)} kcal · P${Math.round(t.protein)} C${Math.round(t.carbs)} F${Math.round(t.fat)}`;
+  // When components exist they are the source of truth; reflect them into the
+  // (collapsible) manual total fields so either view is consistent.
+  if (hasComps) {
+    $('r-cal').value = Math.round(t.calories); $('r-pro').value = Math.round(t.protein);
+    $('r-car').value = Math.round(t.carbs); $('r-fat').value = Math.round(t.fat);
+  }
+  $('r-nocomp-hint').hidden = hasComps;
+  $('r-totals-wrap').style.display = hasComps ? 'block' : 'none';
+}
+
+function renderCompEditor() {
+  const wrap = $('r-items');
+  if (!compItems.length) { wrap.innerHTML = ''; refreshTotals(); return; }
+  wrap.innerHTML = compItems.map((it, idx) => `
+    <div class="item-row" data-i="${idx}">
+      <div class="ir-top">
+        <input class="ir-name" value="${esc(it.name)}" placeholder="food" data-f="name">
+        <button class="ir-del" title="Remove" data-del="${idx}">×</button>
+      </div>
+      <div class="ir-grid">
+        <div class="ir-cell"><label>g</label><input type="number" inputmode="numeric" value="${+it.grams||''}" data-f="grams"></div>
+        <div class="ir-cell"><label>kcal</label><input type="number" inputmode="numeric" value="${Math.round(it.calories)||''}" data-f="calories"></div>
+        <div class="ir-cell"><label>P g</label><input type="number" inputmode="numeric" value="${(+it.protein).toFixed(1)}" data-f="protein"></div>
+        <div class="ir-cell"><label>C g</label><input type="number" inputmode="numeric" value="${(+it.carbs).toFixed(1)}" data-f="carbs"></div>
+      </div>
+      <div class="ir-grid" style="grid-template-columns:1fr 1fr">
+        <div class="ir-cell"><label>F g</label><input type="number" inputmode="numeric" value="${(+it.fat).toFixed(1)}" data-f="fat"></div>
+      </div>
+    </div>`).join('');
+  refreshTotals();
+}
+
 function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl, editingId }) {
   const e = estimate || {};
   $('review-sheet').dataset.editing = editingId || '';
   $('r-desc').value = e.description || '';
+  compItems = (e.items || []).map(i => ({ ...i }));
+  // Manual totals as fallback when there are no components.
   $('r-cal').value = Math.round(e.calories || 0);
   $('r-pro').value = Math.round(e.protein || 0);
   $('r-car').value = Math.round(e.carbs || 0);
   $('r-fat').value = Math.round(e.fat || 0);
+
+  // Date/time default to now (or the meal's stored time when editing).
+  const ts = e.ts ? new Date(e.ts * 1000) : new Date();
+  $('r-date').value = editingId && e.date ? e.date : todayISO();
+  $('r-time').value = editingId && e.ts ? `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}` : nowHM();
 
   const img = $('review-img');
   const src = previewUrl || photoUrl;
@@ -277,9 +360,7 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   const pa = document.querySelector('.photo-actions');
   if (pa) pa.style.display = editingId ? 'none' : 'block';
 
-  $('r-items').innerHTML = (e.items || []).map(i =>
-    `<div><span>${esc(i.name)}${i.grams ? ` · ${fmt(i.grams)}g` : ''}</span><span class="num">${fmt(i.calories)} kcal</span></div>`
-  ).join('');
+  renderCompEditor();
 
   const conf = Math.round((e.confidence ?? 0.5) * 100);
   $('r-prov').innerHTML = `${cap(provider || 'manual')}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
@@ -287,6 +368,27 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   $('review-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
 }
+
+// Component editor event delegation (lives on the container, survives re-render).
+$('r-items').addEventListener('input', (ev) => {
+  const row = ev.target.closest('.item-row'); if (!row) return;
+  const idx = +row.dataset.i, f = ev.target.dataset.f, raw = ev.target.value;
+  if (f === 'name') { compItems[idx].name = raw; return; }
+  const val = Number(raw) || 0;
+  if (f === 'grams') { rescaleItem(compItems[idx], val); renderCompEditor(); return; }
+  compItems[idx][f] = val;
+  refreshTotals();
+});
+$('r-items').addEventListener('click', (ev) => {
+  const del = ev.target.closest('[data-del]'); if (!del) return;
+  compItems.splice(+del.dataset.del, 1); renderCompEditor();
+});
+$('btn-add-item').addEventListener('click', () => {
+  compItems.push({ name: '', grams: 0, calories: 0, protein: 0, carbs: 0, fat: 0 });
+  renderCompEditor();
+  const rows = $('r-items').querySelectorAll('.item-row');
+  if (rows.length) rows[rows.length - 1].querySelector('.ir-name').focus();
+});
 
 function closeSheets() {
   $('review-sheet').hidden = true;
@@ -298,15 +400,26 @@ $('btn-cancel-review').addEventListener('click', closeSheets);
 $('review-sheet').addEventListener('click', (e) => { if (e.target.id === 'review-sheet') closeSheets(); });
 
 $('btn-save-review').addEventListener('click', async () => {
+  const hasComps = compItems.length > 0;
+  const cleanComps = compItems.filter(i => (i.name || +i.grams || +i.calories));
   const payload = {
     description: $('r-desc').value.trim(),
-    calories: Number($('r-cal').value) || 0,
-    protein: Number($('r-pro').value) || 0,
-    carbs: Number($('r-car').value) || 0,
-    fat: Number($('r-fat').value) || 0,
     kind: $('r-kind').value,
+    date: $('r-date').value || undefined,
+    time: $('r-time').value || undefined,
     source: 'photo',
   };
+  if (cleanComps.length) {
+    payload.items = cleanComps;
+    const t = sumComps();
+    payload.calories = t.calories; payload.protein = t.protein;
+    payload.carbs = t.carbs; payload.fat = t.fat;
+  } else {
+    payload.calories = Number($('r-cal').value) || 0;
+    payload.protein = Number($('r-pro').value) || 0;
+    payload.carbs = Number($('r-car').value) || 0;
+    payload.fat = Number($('r-fat').value) || 0;
+  }
   if (payload.calories <= 0) { toast('Calories must be above zero', true); return; }
 
   const editingId = $('review-sheet').dataset.editing;

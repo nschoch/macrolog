@@ -11,6 +11,7 @@ import argparse
 import json
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import sys
@@ -145,6 +146,7 @@ class Api:
         s = get_settings(owner)
         t = today_str()
         meals = db.meals_for_date(t, owner)
+        item_map = db.items_for_date(t, owner)
         consumed = {k: round(sum(float(m[k]) for m in meals), 1)
                     for k in ("calories", "protein", "carbs", "fat")}
         rows = db.query("SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
@@ -158,7 +160,7 @@ class Api:
                      "configured": (p["kind"] == "stub") or (_provider_ready(p) and not p.get("unreachable"))}
                     for p in s.get("providers", [])]
         return 200, {
-            "date": t, "meals": [_meal_dict(m) for m in meals],
+            "date": t, "meals": [_meal_dict(m, item_map.get(m["id"], [])) for m in meals],
             "consumed": consumed, "targets": targets, "trend": trend,
             "settings": _public_settings(s), "providers": providers,
             "active_provider": ready[0] if ready else "stub",
@@ -205,6 +207,8 @@ class Api:
         if photo and not os.path.abspath(photo).startswith(os.path.abspath(PHOTO_DIR)):
             return 400, {"error": "invalid photo path"}
         d = body.get("date") or today_str()
+        ts = _parse_when(body, default_date=d)
+        items = _sanitize_items(body.get("items"))
         meal = {
             "description": str(body.get("description") or "")[:200],
             "calories": float(body.get("calories") or 0),
@@ -212,13 +216,17 @@ class Api:
             "carbs": float(body.get("carbs") or 0),
             "fat": float(body.get("fat") or 0),
         }
+        # When components are supplied, the meal total IS their sum (single source
+        # of truth); otherwise fall back to the flat totals the client sent.
+        if items:
+            meal.update(_sum_items(items))
         if meal["calories"] <= 0:
             if photo and os.path.exists(photo):
                 os.remove(photo)
             return 400, {"error": "calories must be > 0"}
         final_path = _promote_photo(photo) if photo else None
         mid = db.add_meal(
-            date=d, ts=int(body.get("ts") or local_ts_for(d)),
+            date=d, ts=ts,
             kind=str(body.get("kind") or "other")[:20],
             description=meal["description"], calories=meal["calories"],
             protein=meal["protein"], carbs=meal["carbs"], fat=meal["fat"],
@@ -227,30 +235,51 @@ class Api:
             provider=str(body.get("provider") or "")[:30],
             model=str(body.get("model") or "")[:60],
             raw_json=json.dumps(body.get("raw") or {})[:8000], owner=owner)
+        if items:
+            db.replace_meal_items(mid, items)
         _maybe_adapt(s, owner=owner)
         return 201, {"id": mid, **_day_summary(d, owner)}
 
     @staticmethod
     def PATCH_meal(h, q, body, meal_id):
         owner = getattr(h, "owner", "default")
-        old = db.get_meal(int(meal_id), owner)
+        mid = int(meal_id)
+        old = db.get_meal(mid, owner)
         if not old:
             return 404, {"error": "meal not found"}
+        # Components supplied -> replace them and derive totals from the sum.
+        items = _sanitize_items(body.get("items")) if "items" in body else None
         fields = {k: v for k, v in body.items()
                   if k in ("kind", "description", "calories", "protein", "carbs", "fat")}
-        if not fields:
+        new_date = old["date"]
+        if items is not None:
+            summed = _sum_items(items)
+            fields.update(summed)          # totals follow components
+            db.replace_meal_items(mid, items)
+        # Date/time edits (only when provided).
+        upd_ts = None
+        if body.get("date") or body.get("time"):
+            new_date = body.get("date") or old["date"]
+            upd_ts = _parse_when({**body, "date": new_date}, default_date=new_date,
+                                 fallback_ts=old["ts"])
+            db.execute("UPDATE meals SET date=?, ts=? WHERE id=? AND owner=?",
+                       (new_date, upd_ts, mid, owner))
+        if fields:
+            db.update_meal(mid, owner=owner, **fields)
+        if not fields and items is None and upd_ts is None:
             return 400, {"error": "no editable fields supplied"}
-        db.update_meal(int(meal_id), owner=owner, **fields)
         new = dict(old)
         new.update(fields)
-        n = record_correction(db, int(meal_id), {
+        n = record_correction(db, mid, {
             "calories": old["calories"], "protein": old["protein"],
             "carbs": old["carbs"], "fat": old["fat"]}, new, int(time.time()))
         s = get_settings(owner)
         _maybe_adapt(s, owner=owner)
-        return 200, {"updated": True, "corrections_recorded": n,
-                     "multipliers": calibration_multipliers(db, owner=owner),
-                     **_day_summary(old["date"], owner)}
+        summary_dates = {old["date"], new_date}
+        result = {"updated": True, "corrections_recorded": n,
+                  "multipliers": calibration_multipliers(db, owner=owner)}
+        result.update(_day_summary(list(summary_dates)[0], owner))
+        return 200, result
 
     @staticmethod
     def DELETE_meal(h, q, body, meal_id):
@@ -492,13 +521,66 @@ def sweep_temp_photos(max_age_hours: int = 6) -> int:
     return removed
 
 
-def _meal_dict(m) -> dict:
-    return {"id": m["id"], "ts": m["ts"], "date": m["date"], "kind": m["kind"],
-            "description": m["description"], "calories": m["calories"],
-            "protein": m["protein"], "carbs": m["carbs"], "fat": m["fat"],
-            "confidence": m["confidence"], "source": m["source"],
-            "provider": m["provider"], "model": m["model"],
-            "photo": os.path.basename(m["photo_path"]) if m["photo_path"] else None}
+def _meal_dict(m, items=None) -> dict:
+    d = {"id": m["id"], "ts": m["ts"], "date": m["date"], "kind": m["kind"],
+         "description": m["description"], "calories": m["calories"],
+         "protein": m["protein"], "carbs": m["carbs"], "fat": m["fat"],
+         "confidence": m["confidence"], "source": m["source"],
+         "provider": m["provider"], "model": m["model"],
+         "photo": os.path.basename(m["photo_path"]) if m["photo_path"] else None}
+    if items is not None:
+        d["items"] = items
+    return d
+
+
+def _sanitize_items(raw) -> list[dict]:
+    """Coerce client-supplied components into safe rows (name + grams + macros)."""
+    out = []
+    for it in (raw or [])[:40]:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()[:120]
+        g = max(0.0, float(it.get("grams") or 0))
+        cal = max(0.0, float(it.get("calories") or 0))
+        if not name and g == 0 and cal == 0:
+            continue
+        out.append({"name": name, "grams": g, "calories": cal,
+                    "protein": max(0.0, float(it.get("protein") or 0)),
+                    "carbs": max(0.0, float(it.get("carbs") or 0)),
+                    "fat": max(0.0, float(it.get("fat") or 0))})
+    return out
+
+
+def _sum_items(items: list[dict]) -> dict:
+    tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+    for it in items:
+        for k in tot:
+            tot[k] += float(it.get(k) or 0)
+    return {k: round(v, 1) for k, v in tot.items()}
+
+
+def _parse_when(body: dict, default_date: str, fallback_ts: int | None = None) -> int:
+    """Resolve a meal's epoch ts from optional date (YYYY-MM-DD) + time (HH:MM).
+
+    Missing time keeps the current clock time on that day; missing both falls
+    back to local_ts_for(default_date) so behaviour matches the old path.
+    """
+    d = body.get("date") or default_date
+    t = body.get("time")
+    try:
+        dt = date.fromisoformat(str(d)[:10])
+    except ValueError:
+        return fallback_ts if fallback_ts is not None else local_ts_for(default_date)
+    if t and re.match(r"^\d{1,2}:\d{2}", str(t)):
+        hh, mm = str(t)[:5].split(":")
+        return int(datetime(dt.year, dt.month, dt.day,
+                            min(23, int(hh)), min(59, int(mm))).timestamp())
+    if fallback_ts is not None:
+        # Keep the existing clock time-of-day when only the date changed.
+        base = datetime.fromtimestamp(fallback_ts)
+        return int(datetime(dt.year, dt.month, dt.day, base.hour, base.minute).timestamp())
+    now = datetime.now()
+    return int(datetime(dt.year, dt.month, dt.day, now.hour, now.minute).timestamp())
 
 
 def _exercise_total(d: str, owner: str = "default") -> float:
@@ -508,10 +590,11 @@ def _exercise_total(d: str, owner: str = "default") -> float:
 
 def _day_summary(d: str, owner: str = "default") -> dict:
     meals = db.meals_for_date(d, owner)
+    item_map = db.items_for_date(d, owner)
     return {"date": d, "consumed": {
         k: round(sum(float(m[k]) for m in meals), 1)
         for k in ("calories", "protein", "carbs", "fat")},
-        "meals": [_meal_dict(m) for m in meals],
+        "meals": [_meal_dict(m, item_map.get(m["id"], [])) for m in meals],
         "exercise": _exercise_total(d, owner)}
 
 
@@ -579,11 +662,22 @@ class Handler(BaseHTTPRequestHandler):
         return f"{proto}://{host}"
 
     def _set_cookie(self, name, value, max_age=None, path="/"):
-        bits = [f"{name}={_urlquote(value)}", f"Path={path}",
-                "HttpOnly", "SameSite=Lax"]
+        bits = [f"{name}={_urlquote(value)}", f"Path={path}", "HttpOnly"]
+        # Auth cookies are always served over HTTPS (behind Caddy). iOS Safari
+        # drops a SameSite=Lax cookie that lacks Secure when it survives a
+        # cross-site OAuth redirect, so we must set Secure + Lax explicitly.
+        secure = self._is_https()
+        if secure:
+            bits.append("Secure")
+        bits.append("SameSite=Lax")
         if max_age is not None:
             bits.append(f"Max-Age={max_age}")
         self._pending_cookies.append("; ".join(bits))
+
+    def _is_https(self) -> bool:
+        if os.environ.get("OIDC_REDIRECT_BASE", "").startswith("https://"):
+            return True
+        return self.headers.get("X-Forwarded-Proto", "") == "https"
 
     def _redirect(self, location):
         self.send_response(302)

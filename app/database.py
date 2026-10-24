@@ -90,6 +90,19 @@ CREATE TABLE IF NOT EXISTS estimates (
 -- _migrate() AFTER any ALTER TABLE ADD COLUMN owner has run.
 CREATE INDEX IF NOT EXISTS idx_meals_date ON meals(date);
 CREATE INDEX IF NOT EXISTS idx_est_field ON estimates(field);
+
+CREATE TABLE IF NOT EXISTS meal_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    meal_id     INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+    ord         INTEGER NOT NULL DEFAULT 0,        -- display order within the meal
+    name        TEXT    NOT NULL DEFAULT '',
+    grams       REAL    NOT NULL DEFAULT 0,
+    calories    REAL    NOT NULL DEFAULT 0,
+    protein     REAL    NOT NULL DEFAULT 0,
+    carbs       REAL    NOT NULL DEFAULT 0,
+    fat         REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_items_meal ON meal_items(meal_id, ord);
 """
 
 
@@ -219,6 +232,50 @@ class Database:
     def meals_for_date(self, date: str, owner: str = "default") -> list[sqlite3.Row]:
         return self.query(
             "SELECT * FROM meals WHERE date=? AND owner=? ORDER BY ts", (date, owner))
+
+    # -- meal components (items) ----------------------------------------
+    def replace_meal_items(self, meal_id: int, items: list[dict]) -> dict:
+        """Overwrite a meal's components and recompute its cached totals.
+
+        Returns the summed {calories,protein,carbs,fat} so callers can persist
+        them onto the meals row too. Totals are ALWAYS the sum of items when any
+        items exist, keeping meal.total == SUM(components) as an invariant.
+        """
+        self.execute("DELETE FROM meal_items WHERE meal_id=?", (meal_id,))
+        rows = []
+        tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+        for i, it in enumerate(items):
+            g = float(it.get("grams") or 0)
+            cal = float(it.get("calories") or 0)
+            p = float(it.get("protein") or 0)
+            c = float(it.get("carbs") or 0)
+            f = float(it.get("fat") or 0)
+            rows.append((meal_id, i, str(it.get("name") or "")[:120], g, cal, p, c, f))
+            tot["calories"] += cal; tot["protein"] += p
+            tot["carbs"] += c; tot["fat"] += f
+        if rows:
+            self.executemany(
+                "INSERT INTO meal_items(meal_id,ord,name,grams,calories,protein,carbs,fat) "
+                "VALUES(?,?,?,?,?,?,?,?)", rows)
+        return {k: round(v, 1) for k, v in tot.items()}
+
+    def items_for_meal(self, meal_id: int) -> list[dict]:
+        return [dict(r) for r in self.query(
+            "SELECT id,name,grams,calories,protein,carbs,fat FROM meal_items "
+            "WHERE meal_id=? ORDER BY ord", (meal_id,))]
+
+    def items_for_date(self, date: str, owner: str = "default") -> dict:
+        """{meal_id: [items]} for every meal the owner logged on a date."""
+        out: dict[int, list] = {}
+        for r in self.query(
+                "SELECT mi.* FROM meal_items mi JOIN meals m ON m.id=mi.meal_id "
+                "WHERE m.date=? AND m.owner=? ORDER BY mi.meal_id, mi.ord",
+                (date, owner)):
+            out.setdefault(r["meal_id"], []).append({
+                "id": r["id"], "name": r["name"], "grams": r["grams"],
+                "calories": r["calories"], "protein": r["protein"],
+                "carbs": r["carbs"], "fat": r["fat"]})
+        return out
 
     # -- weights ---------------------------------------------------------
     def set_weight(self, date: str, ts: int, value: float, owner: str = "default") -> None:

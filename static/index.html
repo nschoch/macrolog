@@ -141,13 +141,28 @@
     <img id="review-img" alt="your meal" class="review-img">
     <div class="photo-actions"><button class="ghost tiny" id="btn-recrop">Choose different photo</button></div>
     <label class="fld">Description<input id="r-desc" type="text" placeholder="what did you eat?"></label>
-    <div class="grid4">
-      <label class="fld">kcal<input id="r-cal" type="number" inputmode="numeric"></label>
-      <label class="fld">P (g)<input id="r-pro" type="number" inputmode="numeric"></label>
-      <label class="fld">C (g)<input id="r-car" type="number" inputmode="numeric"></label>
-      <label class="fld">F (g)<input id="r-fat" type="number" inputmode="numeric"></label>
+    <div class="grid2">
+      <label class="fld">Date<input id="r-date" type="date"></label>
+      <label class="fld">Time<input id="r-time" type="time"></label>
     </div>
-    <div class="items" id="r-items"></div>
+
+    <div class="section-head sub">
+      <span>Components</span>
+      <button class="ghost tiny" id="btn-add-item">+ Add item</button>
+    </div>
+    <div class="item-editor" id="r-items"></div>
+    <p class="hint" id="r-nocomp-hint" hidden>No breakdown detected — edit totals directly below.</p>
+
+    <details class="totals-toggle" id="r-totals-wrap">
+      <summary>Totals: <b id="r-total-shown">0 kcal</b></summary>
+      <div class="grid4">
+        <label class="fld">kcal<input id="r-cal" type="number" inputmode="numeric"></label>
+        <label class="fld">P (g)<input id="r-pro" type="number" inputmode="numeric"></label>
+        <label class="fld">C (g)<input id="r-car" type="number" inputmode="numeric"></label>
+        <label class="fld">F (g)<input id="r-fat" type="number" inputmode="numeric"></label>
+      </div>
+    </details>
+
     <label class="fld">Meal
       <select id="r-kind"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
       <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
