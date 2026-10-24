@@ -211,18 +211,27 @@ class GeminiProvider:
 
 
 class OpenAICompatProvider:
-    """OpenAI, Groq, and any OpenAI-compatible /chat/completions endpoint."""
+    """Any OpenAI-compatible /chat/completions endpoint that accepts images.
+
+    Covers OpenAI, Groq, and Alibaba DashScope Token Plan (Qwen). The
+    `base_url` and `env_key` args let a provider opt into a different host and
+    credential variable without subclassing.
+    """
 
     def __init__(self, cfg: dict, name: str = "openai"):
         self.name = name
-        env_prefix = {"groq": "GROQ", "openai": "OPENAI"}.get(name, name.upper())
-        self.key = cfg.get("api_key") or os.environ.get(f"{env_prefix}_API_KEY", "")
+        env_var = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY",
+                   "qwen": "DASHSCOPE_API_KEY"}.get(name, f"{name.upper()}_API_KEY")
+        self.key = cfg.get("api_key") or os.environ.get(env_var, "")
         defaults = {
             "groq": ("https://api.groq.com/openai/v1", "meta-llama/llama-4-scout-17b-16e-instruct"),
             "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
+            # DashScope OpenAI-compatible endpoint; qwen-vl-max is their flagship
+            # multimodal model. Region-specific hosts exist (cn-beijing etc.).
+            "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-vl-max"),
         }
         base, model = defaults.get(name, ("", "gpt-4o-mini"))
-        self.base = cfg.get("base_url", base)
+        self.base = (cfg.get("base_url") or base).rstrip("/")
         self.model = cfg.get("model", model)
 
     def estimate(self, image_path: str) -> dict:
@@ -239,7 +248,9 @@ class OpenAICompatProvider:
                  "image_url": {"url": f"data:{mime};base64,{b64}"}},
             ]}],
         }
-        if self.name != "groq":
+        # groq rejects response_format; DashScope wants the word "JSON" in the
+        # prompt (already present) and tolerates json_object on vl models.
+        if self.name not in ("groq", "qwen"):
             payload["response_format"] = {"type": "json_object"}
         data = _post(f"{self.base}/chat/completions", payload,
                      {"Authorization": f"Bearer {self.key}"})
@@ -302,9 +313,30 @@ PROVIDERS = {
     "gemini": GeminiProvider,
     "openai": lambda cfg: OpenAICompatProvider(cfg, "openai"),
     "groq": lambda cfg: OpenAICompatProvider(cfg, "groq"),
+    "qwen": lambda cfg: OpenAICompatProvider(cfg, "qwen"),
     "ollama": OllamaProvider,
     "stub": StubProvider,
 }
+
+
+_OLLAMA_REACH_CACHE = {"ts": 0.0, "ok": False}
+
+
+def _ollama_reachable(base_url: str) -> bool:
+    """Cached (30s) liveness probe so we don't mark ollama ready when down."""
+    import time as _t
+    now = _t.time()
+    if now - _OLLAMA_REACH_CACHE["ts"] < 30:
+        return _OLLAMA_REACH_CACHE["ok"]
+    ok = False
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            ok = r.status == 200
+    except Exception:
+        ok = False
+    _OLLAMA_REACH_CACHE.update(ts=now, ok=ok)
+    return ok
 
 
 def _has_credentials(entry: dict) -> bool:
@@ -315,12 +347,13 @@ def _has_credentials(entry: dict) -> bool:
     if entry.get("api_key"):
         return True
     env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-           "groq": "GROQ_API_KEY"}.get(kind)
+           "groq": "GROQ_API_KEY", "qwen": "DASHSCOPE_API_KEY"}.get(kind)
     if env:
         return bool(os.environ.get(env))
     if kind == "ollama":
-        # Local server: assume it is reachable; failures surface as errors.
-        return True
+        base = entry.get("base_url") or os.environ.get(
+            "OLLAMA_HOST", "http://127.0.0.1:11434")
+        return _ollama_reachable(base)
     return False
 
 

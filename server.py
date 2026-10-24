@@ -52,6 +52,7 @@ DEFAULT_SETTINGS = {
     "calibrate_estimates": True,
     # Provider chain, tried in order. First entry wins; missing keys are skipped.
     "providers": [
+        {"kind": "qwen",   "model": "qwen-vl-max"},
         {"kind": "groq",   "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
         {"kind": "gemini", "model": "gemini-2.5-flash"},
         {"kind": "openai", "model": "gpt-4o-mini"},
@@ -301,7 +302,7 @@ class Api:
                      "accuracy": accuracy_summary(db),
                      "multipliers": calibration_multipliers(db),
                      "has_keys": {k: bool(os.environ.get(k)) for k in
-                                  ("GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY")}}
+                                  ("GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "DASHSCOPE_API_KEY")}}
 
     @staticmethod
     def PUT_settings(h, q, body):
@@ -349,7 +350,7 @@ class Api:
                 if kind == "stub":
                     raise ProviderError("stub provider has no remote endpoint")
                 key_env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-                           "groq": "GROQ_API_KEY"}.get(kind)
+                           "groq": "GROQ_API_KEY", "qwen": "DASHSCOPE_API_KEY"}.get(kind)
                 key = p.get("api_key") or (os.environ.get(key_env) if key_env else "x")
                 if not key:
                     raise ProviderError("no API key configured")
@@ -357,14 +358,17 @@ class Api:
                     "gemini": "https://generativelanguage.googleapis.com",
                     "openai": "https://api.openai.com/v1",
                     "groq": "https://api.groq.com/openai/v1",
+                    "qwen": os.environ.get("DASHSCOPE_BASE_URL",
+                            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
                     "ollama": os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
                 }.get(kind)
                 url, payload, headers = _ping_request(kind, base, p.get("model"))
-                req = __import__("urllib.request").Request(
+                import urllib.request as U
+                req = U.Request(
                     url, data=json.dumps(payload).encode(),
                     headers={"Content-Type": "application/json", **headers})
                 t0 = time.time()
-                with __import__("urllib.request").urlopen(req, timeout=30) as r:
+                with U.urlopen(req, timeout=30) as r:
                     json.loads(r.read())
                 results.append({"kind": kind, "model": p.get("model"), "ok": True,
                                 "ms": int((time.time() - t0) * 1000)})
@@ -392,7 +396,8 @@ def _ping_request(kind, base, model):
             {"model": model, "messages": [{"role": "user", "content": "ping"}],
              "max_tokens": 5},
             {"Authorization": "Bearer " + os.environ.get(
-                {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY"}.get(kind, ""), "")})
+                {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY",
+                 "qwen": "DASHSCOPE_API_KEY"}.get(kind, ""), "")})
 
 
 def _provider_ready(entry: dict) -> bool:
@@ -753,7 +758,8 @@ def main():
     s = get_settings()
     ready = [p["kind"] for p in s.get("providers", [])
              if os.environ.get({"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-                                "groq": "GROQ_API_KEY"}.get(p["kind"], ""))]
+                                "groq": "GROQ_API_KEY",
+                                "qwen": "DASHSCOPE_API_KEY"}.get(p["kind"], ""))]
     print(f"  vision:   {', '.join(ready) if ready else 'NONE - running offline stub'}")
     print("  Ctrl-C to stop\n")
     try:
