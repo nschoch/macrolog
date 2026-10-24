@@ -11,6 +11,11 @@ import { join } from 'node:path';
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8790/';
 const COOKIE = process.argv[3] || '';
+// Optional: route the real hostname to a local port-forward (e.g. an SSH
+// tunnel) so headless Chrome can reach deployments that its network stack
+// cannot touch directly. TLS is still validated against the REAL hostname.
+const TUNNEL = process.env.ML_TUNNEL_MAP || '';   // e.g. "host:443=127.0.0.1:1443"
+const HOST = (BASE.match(/^https?:\/\/([^/:]+)/) || [])[1];
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 const profile = mkdtempSync(join(tmpdir(), 'ml-chrome-'));
@@ -19,7 +24,9 @@ const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${port}`,
   `--user-data-dir=${profile}`, '--no-first-run', '--disable-gpu', '--no-sandbox',
   '--disable-crash-reporter', `--crash-pads-dir=${profile}/crashpad`,
-  '--window-size=430,900', 'about:blank',
+  '--window-size=430,900',
+  ...(TUNNEL ? [`--host-resolver-rules=MAP ${HOST} ${TUNNEL.split('=')[1]}`] : []),
+  'about:blank',
 ], { stdio: 'ignore' });
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -59,16 +66,31 @@ const check = (name, ok, detail = '') => {
 try {
   const list = await waitForJson(`http://127.0.0.1:${port}/json/list`);
   const target = list.find(t => t.type === 'page');
+  if (!target?.webSocketDebuggerUrl) throw new Error('no CDP page target: ' + JSON.stringify(target));
   const client = await cdp(target.webSocketDebuggerUrl);
   const { send } = client;
+
+  // Helper: evaluate JS in the page and return the JSON value (throws on error).
+  // send() resolves the raw CDP envelope: { id, result: { result: RemoteObject }, exceptionDetails? }.
+  const evalJson = async (expr, tries = 3) => {
+    for (let i = 0; i < tries; i++) {
+      const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+      if (r.exceptionDetails) throw new Error('page threw: ' + JSON.stringify(r.exceptionDetails).slice(0, 300));
+      const res = r.result?.result || {};
+      if (res.type === 'null') return null;
+      if (res.type === 'undefined') return undefined;   // fire-and-forget expressions
+      if ('value' in res && res.value !== undefined) return res.value;
+      await sleep(500);
+    }
+    throw new Error('evaluate returned no value: ' + expr.slice(0, 80));
+  };
 
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Log.enable');
   await send('Network.enable');
   if (COOKIE) {
-    const m = BASE.match(/^https?:\/\/([^/:]+)/);
-    await send('Network.setCookie', { name: 'macrolog_session', value: COOKIE, domain: m[1], path: '/' });
+    await send('Network.setCookie', { name: 'macrolog_session', value: COOKIE, url: BASE, path: '/' });
   }
 
   const jsErrors = [];
@@ -85,48 +107,54 @@ try {
   };
 
   await send('Page.navigate', { url: BASE });
-  await sleep(3500); drain();
+  // Wait for the app to boot (window state populated by first refresh()).
+  let booted = false;
+  for (let i = 0; i < 40 && !booted; i++) {
+    await sleep(500);
+    // typeof-guard: evaluating a bare `state` throws ReferenceError if app.js
+    // never ran, which would mask the real diagnosis.
+    booted = await evalJson(`typeof state !== 'undefined' && !!state`).catch((e) => { console.log('probe err:', String(e.message).slice(0,140)); return false; });
+    if (i === 5) console.log('mid-boot location:', await evalJson(`location.href`).catch(() => '?'));
+  }
+  if (!booted) throw new Error('app never booted (state stayed null) — check auth/redirect');
+  await sleep(1000); drain();
   check('initial load has no JS errors', jsErrors.length === 0, jsErrors.join(' | ').slice(0, 300));
 
   // Switch to Settings view.
-  await send('Runtime.evaluate', { expression: `
-    document.querySelector('button[data-view="settings"]').click(); 'ok'` });
+  await evalJson(`document.querySelector('button[data-view="settings"]').click()`);
   await sleep(1200); drain();
 
-  const btnState = async () => (await send('Runtime.evaluate', {
-    expression: `JSON.stringify({label: document.getElementById('btn-unlock').textContent.trim(),
+  const btnState = () => evalJson(`(({label: document.getElementById('btn-unlock').textContent.trim(),
       targetVal: document.getElementById('s-target').value,
-      viewActive: document.getElementById('view-settings').classList.contains('active')})`,
-    returnByValue: true })).result.result.value;
+      viewActive: document.getElementById('view-settings').classList.contains('active')}))`);
 
-  let s0 = JSON.parse(await btnState());
+  let s0 = await btnState();
   check('settings view active', s0.viewActive);
   check('button shows "auto" on fresh account (calorie_target null)', s0.label === 'auto', `label=${s0.label}`);
 
   // Click 1: auto -> lock (server pins 2200 fallback when target was null? see code: locks at s.calorie_target || 2200)
   const errsBefore = jsErrors.length;
-  await send('Runtime.evaluate', { expression: `document.getElementById('btn-unlock').click(); 'clicked'` });
+  await evalJson(`document.getElementById('btn-unlock').click()`);
   await sleep(2500); drain();
   check('click #1 produced no JS error', jsErrors.length === errsBefore, jsErrors.slice(errsBefore).join(' | ').slice(0, 300));
-  let s1 = JSON.parse(await btnState());
+  let s1 = await btnState();
   check('after click #1 button shows "locked"', s1.label === 'locked', `label=${s1.label} targetVal=${s1.targetVal}`);
 
-  // Verify server-side.
-  const st = await (await fetch(BASE.replace(/\/$/, '') + '/api/state')).json().catch(() => null);
-  check('server calorie_target pinned after lock', st && st.settings.calorie_target != null,
-    st ? `calorie_target=${st.settings.calorie_target}` : 'state fetch failed (auth?)');
+  // Verify server-side (in-page fetch so the session cookie rides along).
+  const serverTarget = () => evalJson(`fetch('/api/state').then(r=>r.json()).then(d=>({v: d.settings.calorie_target ?? null}))`).then(o => o.v);
+  const st = await serverTarget().catch(() => 'ERR');
+  check('server calorie_target pinned after lock', st != null && st !== 'ERR', `calorie_target=${st}`);
 
   // Click 2: locked -> auto.
   const errsBefore2 = jsErrors.length;
-  await send('Runtime.evaluate', { expression: `document.getElementById('btn-unlock').click(); 'clicked'` });
+  await evalJson(`document.getElementById('btn-unlock').click()`);
   await sleep(2500); drain();
   check('click #2 produced no JS error', jsErrors.length === errsBefore2, jsErrors.slice(errsBefore2).join(' | ').slice(0, 300));
-  let s2 = JSON.parse(await btnState());
+  let s2 = await btnState();
   check('after click #2 button shows "auto"', s2.label === 'auto', `label=${s2.label}`);
 
-  const st2 = await (await fetch(BASE.replace(/\/$/, '') + '/api/state')).json().catch(() => null);
-  check('server calorie_target cleared after unlock', st2 && st2.settings.calorie_target == null,
-    st2 ? `calorie_target=${st2.settings.calorie_target}` : '');
+  const st2 = await serverTarget().catch(() => 'ERR');
+  check('server calorie_target cleared after unlock', st2 == null, `calorie_target=${st2}`);
 
   // Screenshot for the record.
   const shot = await send('Page.captureScreenshot', { format: 'png' });
