@@ -47,8 +47,6 @@ CREATE TABLE IF NOT EXISTS meals (
     raw_json      TEXT    NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_meals_date ON meals(date);
-CREATE INDEX IF NOT EXISTS idx_meals_owner ON meals(owner, date);
 
 CREATE TABLE IF NOT EXISTS weights (
     owner   TEXT    NOT NULL DEFAULT 'default',
@@ -58,7 +56,6 @@ CREATE TABLE IF NOT EXISTS weights (
     value   REAL    NOT NULL,
     source  TEXT    NOT NULL DEFAULT 'manual'
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_date ON weights(owner, date);
 
 CREATE TABLE IF NOT EXISTS body_fat (
     owner  TEXT    NOT NULL DEFAULT 'default',
@@ -67,7 +64,6 @@ CREATE TABLE IF NOT EXISTS body_fat (
     date   TEXT    NOT NULL,
     value  REAL    NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_date ON body_fat(owner, date);
 
 CREATE TABLE IF NOT EXISTS exercises (
     owner         TEXT    NOT NULL DEFAULT 'default',
@@ -77,7 +73,6 @@ CREATE TABLE IF NOT EXISTS exercises (
     name        TEXT    NOT NULL,
     calories    REAL    NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_ex_date ON exercises(owner, date);
 
 CREATE TABLE IF NOT EXISTS estimates (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +84,11 @@ CREATE TABLE IF NOT EXISTS estimates (
     rel_error    REAL    NOT NULL,
     logged_at    INTEGER NOT NULL
 );
+
+-- Indexes that do NOT reference owner are safe to create during executescript on
+-- both fresh and upgraded databases. The owner-composite indexes are created in
+-- _migrate() AFTER any ALTER TABLE ADD COLUMN owner has run.
+CREATE INDEX IF NOT EXISTS idx_meals_date ON meals(date);
 CREATE INDEX IF NOT EXISTS idx_est_field ON estimates(field);
 """
 
@@ -110,31 +110,23 @@ class Database:
         """Idempotent upgrades for databases created before per-user scoping.
 
         CREATE TABLE IF NOT EXISTS won't add columns to existing tables, so we
-        detect and ALTER. Safe to run every startup.
+        detect and ALTER. Then create the owner-composite indexes unconditionally
+        (they can't live in SCHEMA because executescript runs before any ALTER).
+        Safe to run every startup.
         """
-        has_owner = {}
         for tbl in ("meals", "weights", "body_fat", "exercises"):
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({tbl})")}
-            has_owner[tbl] = "owner" in cols
-            if not has_owner[tbl]:
+            if "owner" not in cols:
                 self._conn.execute(
                     f"ALTER TABLE {tbl} ADD COLUMN owner TEXT NOT NULL DEFAULT 'default'")
-        # Recreate the two unique indexes that must now include owner.
-        if not has_owner["weights"]:
-            self._conn.execute("DROP INDEX IF EXISTS idx_weights_date")
-            self._conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_date ON weights(owner, date)")
-        if not has_owner["body_fat"]:
-            self._conn.execute("DROP INDEX IF EXISTS idx_bf_date")
-            self._conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_date ON body_fat(owner, date)")
-        if not has_owner["meals"]:
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_meals_owner ON meals(owner, date)")
-        if not has_owner["exercises"]:
-            self._conn.execute("DROP INDEX IF EXISTS idx_ex_date")
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ex_date ON exercises(owner, date)")
+        # Drop legacy single-column unique indexes, then (re)create owner-scoped ones.
+        # On an old weights/body_fat DB the pre-existing idx on (date) alone would
+        # conflict with per-user rows, so drop-if-exists first regardless of source.
+        self._conn.execute("DROP INDEX IF EXISTS idx_meals_date_legacy")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_meals_owner ON meals(owner, date)")
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_owner_date ON weights(owner, date)")
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_owner_date ON body_fat(owner, date)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ex_owner_date ON exercises(owner, date)")
 
     # -- users -----------------------------------------------------------
     def upsert_user(self, subject: str, email=None, name=None, picture=None) -> dict:
