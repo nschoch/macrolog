@@ -221,17 +221,16 @@ class OpenAICompatProvider:
     def __init__(self, cfg: dict, name: str = "openai"):
         self.name = name
         env_var = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY",
-                   "qwen": "DASHSCOPE_API_KEY"}.get(name, f"{name.upper()}_API_KEY")
+                   "qwenplan": "QWENPLAN_API_KEY"}.get(name, f"{name.upper()}_API_KEY")
         self.key = cfg.get("api_key") or os.environ.get(env_var, "")
         defaults = {
             "groq": ("https://api.groq.com/openai/v1", "meta-llama/llama-4-scout-17b-16e-instruct"),
             "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
-            # DashScope OpenAI-compatible endpoint; qwen-vl-max is their flagship
-            # multimodal model. Override region with DASHSCOPE_BASE_URL (e.g. a
-            # token-plan.maas.* host).
-            "qwen": (os.environ.get("DASHSCOPE_BASE_URL")
-                     or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                     os.environ.get("QWEN_VL_MODEL", "qwen-vl-max")),
+                        # Qwen Token Plan ("qwenplan"): DashScope-compatible OpenAI endpoint.
+            # Override host with QWENPLAN_BASE_URL (token-plan.maas.* hosts vary by region).
+            "qwenplan": (os.environ.get("QWENPLAN_BASE_URL")
+                     or "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                     os.environ.get("QWENPLAN_MODEL", "qwen3.8-max")),
         }
         base, model = defaults.get(name, ("", "gpt-4o-mini"))
         self.base = (cfg.get("base_url") or base).rstrip("/")
@@ -253,7 +252,7 @@ class OpenAICompatProvider:
         }
         # groq rejects response_format; DashScope wants the word "JSON" in the
         # prompt (already present) and tolerates json_object on vl models.
-        if self.name not in ("groq", "qwen"):
+        if self.name not in ("groq", "qwenplan"):
             payload["response_format"] = {"type": "json_object"}
         data = _post(f"{self.base}/chat/completions", payload,
                      {"Authorization": f"Bearer {self.key}"})
@@ -316,7 +315,7 @@ PROVIDERS = {
     "gemini": GeminiProvider,
     "openai": lambda cfg: OpenAICompatProvider(cfg, "openai"),
     "groq": lambda cfg: OpenAICompatProvider(cfg, "groq"),
-    "qwen": lambda cfg: OpenAICompatProvider(cfg, "qwen"),
+    "qwenplan": lambda cfg: OpenAICompatProvider(cfg, "qwenplan"),
     "ollama": OllamaProvider,
     "stub": StubProvider,
 }
@@ -350,7 +349,7 @@ def _has_credentials(entry: dict) -> bool:
     if entry.get("api_key"):
         return True
     env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-           "groq": "GROQ_API_KEY", "qwen": "DASHSCOPE_API_KEY"}.get(kind)
+           "groq": "GROQ_API_KEY", "qwenplan": "QWENPLAN_API_KEY"}.get(kind)
     if env:
         return bool(os.environ.get(env))
     if kind == "ollama":

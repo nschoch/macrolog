@@ -54,7 +54,9 @@ print(f"\nMacroLog API tests -> {BASE}\n")
 st, s = req("/api/state")
 check("state returns 200", st == 200, str(st))
 check("state has targets.calories", isinstance(s.get("targets", {}).get("calories"), int))
-check("stub fallback flagged", s.get("active_provider") in ("stub", "ollama", "groq", "gemini", "openai"))
+KNOWN_PROVIDERS = {"qwenplan", "groq", "gemini", "openai", "ollama", "stub"}
+check("active provider is known", s.get("active_provider") in KNOWN_PROVIDERS,
+      str(s.get("active_provider")))
 
 # 2. estimate from a photo
 fake_jpeg = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffdb004300") + b"\x00" * 2000 + b"ffd9"

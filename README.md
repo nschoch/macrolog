@@ -52,13 +52,18 @@ Open it on your phone by running with `--host 0.0.0.0` and visiting the LAN/
 Netbird address it prints. In mobile Safari, **Add to Home Screen** for a
 full-screen app with camera access.
 
-### Getting a vision key (free)
+### Getting a vision key
 
 The photo→calories step needs a multimodal model. Pick one:
 
-- **Groq** *(recommended, free, no card)* — grab a key at
+- **Qwen Token Plan** *(default first provider)* — set `QWENPLAN_API_KEY` (an
+  `sk-…` key from [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com))
+  and, if your plan uses a custom host, `QWENPLAN_BASE_URL`. Uses `qwen3.8-max`,
+  which reads images directly. Note: these Token Plans often expose *no*
+  `qwen-vl-*` model — the multimodal text models (qwen3.8-max / -flash) work fine.
+- **Groq** *(free, no card)* — grab a key at
   [console.groq.com/keys](https://console.groq.com/keys), set `GROQ_API_KEY`.
-  Serves Llama 4 Scout (vision). This is the default first provider.
+  Serves Llama 4 Scout (vision).
 - **Google Gemini** — set `GEMINI_API_KEY`. ⚠️ As of late 2026, new `AQ.`-prefixed
   AI Studio keys are being rejected by the Developer API
   ([open issue](https://discuss.ai.google.dev/t/gemini-api-returns-401-access-token-type-unsupported-with-valid-aq-key/188360));
@@ -114,7 +119,7 @@ Everything is editable after the fact, and every edit feeds loop #2.
 server.py            stdlib HTTP server + JSON API (no framework)
 app/
   database.py        SQLite schema + helpers (WAL, thread-safe writes)
-  vision.py          provider layer: groq / gemini / openai / ollama / stub
+  vision.py          provider layer: qwenplan / groq / gemini / openai / ollama / stub
   adaptive.py        weight→target loop + estimate calibration + food groups
 static/              mobile-first PWA (vanilla JS, no build step)
 tests/api_test.py    21 end-to-end API checks
