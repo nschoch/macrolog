@@ -1,6 +1,6 @@
 /* MacroLog offline shell. API calls always hit the server (it's on your LAN);
    only the app chrome is cached so a dropped connection still shows the UI. */
-const CACHE = 'macrolog-v1';
+const CACHE = 'macrolog-v2';
 const SHELL = ['/', '/app.css', '/app.js', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
