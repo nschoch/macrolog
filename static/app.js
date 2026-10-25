@@ -5,6 +5,9 @@ const $ = (id) => document.getElementById(id);
 const CIRC = 2 * Math.PI * 86;
 let state = null;
 let pendingPhoto = null;   // { temp_photo, dataUrl }
+// Which day the Today view is showing. '' = today (server default).
+// All writes (meals, weights) stamp this date while browsing a past day.
+let viewDate = '';                        
 
 // --------------------------------------------------------------- units layer
 // Canonical storage is metric (kg / cm). Imperial is a pure display + input
@@ -112,8 +115,43 @@ function renderUserChip(s) {
   }
 }
 
+const DAY_FMT = { weekday: 'short', month: 'short', day: 'numeric' };
+function isoShift(iso, days) {
+  const d = new Date(iso + 'T12:00:00');   // noon avoids DST edge shifts
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function renderDayHeader(day) {
+  const el = $('day-title');
+  if (!el) return;
+  const d = new Date(day + 'T12:00:00');
+  const label = d.toLocaleDateString(undefined, DAY_FMT);
+  el.textContent = !viewDate ? 'Today' : day === todayISO() ? 'Today' : label;
+  $('btn-day-next').disabled = isoShift(day, 1) > todayISO();
+  const pick = $('day-pick');
+  pick.value = day; pick.max = todayISO();
+}
+
+$('btn-day-prev').addEventListener('click', () => {
+  const d = isoShift(state?.date || todayISO(), -1);
+  viewDate = d === todayISO() ? '' : d;
+  refresh();
+});
+$('btn-day-next').addEventListener('click', () => {
+  const d = isoShift(state?.date || todayISO(), 1);
+  if (d >= todayISO()) { viewDate = ''; refresh(); return; }
+  viewDate = d; refresh();
+});
+$('day-pick').addEventListener('change', (e) => {
+  const d = e.target.value;
+  if (!d) return;
+  viewDate = d === todayISO() ? '' : d;
+  refresh();
+});
+
 function renderToday(s) {
   renderUserChip(s);
+  renderDayHeader(s.date);
   const c = s.consumed, t = s.targets;
   const exercise = s.exercise || 0;
   const remaining = t.calories - c.calories + exercise;
@@ -236,11 +274,17 @@ $('meal-list').addEventListener('click', async (e) => {
   }
 });
 
-// Tap a meal row (not its action buttons) to expand/collapse the breakdown.
-$('meal-list').addEventListener('click', (e) => {
+// Tap a meal row (not its action buttons): on today, expand/collapse the
+// breakdown; on a past day, open it for editing — that's how you fix an old log.
+$('meal-list').addEventListener('click', async (e) => {
   if (e.target.closest('[data-act]')) return;
   const head = e.target.closest('.meal-row'); if (!head) return;
-  head.parentElement.classList.toggle('open');
+  if (!viewDate) { head.parentElement.classList.toggle('open'); return; }
+  try {
+    const m = await api(`meals/${head.dataset.toggle}`);
+    openReview({ estimate: m, provider: m.provider, model: m.model,
+      editingId: m.id, photoUrl: m.photo ? `/api/photo/${encodeURIComponent(m.photo)}` : null });
+  } catch (err) { toast(err.message, true); }
 });
 
 // ------------------------------------------------------------------- capture
@@ -350,7 +394,7 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
 
   // Date/time default to now (or the meal's stored time when editing).
   const ts = e.ts ? new Date(e.ts * 1000) : new Date();
-  $('r-date').value = editingId && e.date ? e.date : todayISO();
+  $('r-date').value = editingId && e.date ? e.date : (viewDate || todayISO());
   $('r-time').value = editingId && e.ts ? `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}` : nowHM();
 
   const img = $('review-img');
@@ -405,7 +449,7 @@ $('btn-save-review').addEventListener('click', async () => {
   const payload = {
     description: $('r-desc').value.trim(),
     kind: $('r-kind').value,
-    date: $('r-date').value || undefined,
+    date: $('r-date').value || viewDate || undefined,
     time: $('r-time').value || undefined,
     source: 'photo',
   };
@@ -461,6 +505,7 @@ $('btn-save-manual').addEventListener('click', async () => {
     fat: Number($('m-fat').value) || 0,
     kind: $('m-kind').value,
     source: 'manual',
+    date: viewDate || undefined,
   };
   if (payload.calories <= 0) { toast('Calories must be above zero', true); return; }
   try {
@@ -482,7 +527,8 @@ $('btn-weight').addEventListener('click', async () => {
     // Send the raw entry plus its unit; server stores canonical kg.
     const res = await api('weight', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value, unit: U.imperial ? 'lb' : 'kg' }),
+      body: JSON.stringify({ value, unit: U.imperial ? 'lb' : 'kg',
+        date: viewDate || undefined }),
     });
     $('w-value').value = '';
     toast(res.adapted
@@ -771,7 +817,7 @@ $('btn-test').addEventListener('click', async () => {
 // -------------------------------------------------------------------- refresh
 async function refresh() {
   try {
-    state = await api('state');
+    state = await api('state' + (viewDate ? '?date=' + encodeURIComponent(viewDate) : ''));
     renderToday(state);
     syncWeightDock();
     if ($('view-settings').classList.contains('active')) renderSettings();

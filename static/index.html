@@ -24,6 +24,13 @@
 <main id="main">
   <!-- ============================ TODAY ============================ -->
   <section id="view-today" class="view active">
+    <div class="day-nav">
+      <button class="ghost tiny" id="btn-day-prev" aria-label="Previous day">&#8249;</button>
+      <h2 id="day-title">Today</h2>
+      <button class="ghost tiny" id="btn-day-next" aria-label="Next day">&#8250;</button>
+      <input type="date" id="day-pick" aria-label="Jump to date">
+    </div>
+
     <div class="rings">
       <svg viewBox="0 0 200 200" class="ring-svg" aria-hidden="true">
         <circle cx="100" cy="100" r="86" class="ring-track"/>

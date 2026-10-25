@@ -48,7 +48,14 @@ def multipart(path, filename, filebytes):
                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
 
 
-print(f"\nMacroLog API tests -> {BASE}\n")
+# Pin the server to the offline stub provider before anything else: a real
+# vision key in the server's .env must NOT make this suite hit live APIs
+# (slow, nondeterministic, costs tokens). Providers with no api_key and no
+# server-side env key are skipped by build_chain(); stub is always appended.
+st, ss = req("/api/settings", "PUT", {"providers": [{"kind": "stub"}]})
+assert st == 200, f"could not pin stub provider: {st} {ss}"
+
+print(f"\nMacroLog API tests -> {BASE} (stub-pinned)\n")
 
 # 1. state
 st, s = req("/api/state")
@@ -173,6 +180,33 @@ check("meal moved to edited date", bool(on_day), str([d['date'] for d in hist.ge
 # 15. delete the component meal; its items should cascade away (no orphans)
 st, _ = req(f"/api/meals/{comp_mid}", "DELETE")
 check("delete component meal -> 200", st == 200, str(st))
+
+# 16. day browsing: GET /api/state?date=YYYY-MM-DD
+import datetime as _dt2
+yesterday = (_dt2.date.today() - _dt2.timedelta(days=1)).isoformat()
+st, sd = req("/api/state")
+check("state without date -> today", st == 200 and sd.get("date") == _dt.date.today().isoformat(), str(sd.get("date")))
+st, sd = req(f"/api/state?date={yesterday}")
+check("state ?date=yesterday accepted", st == 200 and sd.get("date") == yesterday, str(st))
+st, sd = req("/api/state?date=not-a-date")
+check("state bad date -> 400", st == 400, str(st))
+# log a meal onto the viewed day, then confirm it appears there and not today
+st, _ = req("/api/meals", "POST", {"description": "past-day test", "calories": 100,
+                                   "protein": 5, "carbs": 10, "fat": 3, "date": yesterday})
+mid_y = None
+st, sd = req(f"/api/state?date={yesterday}")
+mid_y = next((m["id"] for m in sd.get("meals", []) if m["description"] == "past-day test"), None)
+check("meal visible on its date", mid_y is not None, str([m['description'] for m in sd.get('meals', [])]))
+st, sd = req("/api/state")
+check("past-day meal absent from today", all(m["id"] != mid_y for m in sd.get("meals", [])))
+
+# 17. single-meal fetch (how past-day taps open the editor)
+st, one = req(f"/api/meals/{mid_y}")
+check("GET meal by id -> 200 + fields", st == 200 and one.get("id") == mid_y
+      and one.get("date") == yesterday and "items" in one, str(st))
+st, _ = req("/api/meals/999999")
+check("GET unknown meal -> 404", st == 404, str(st))
+st, _ = req(f"/api/meals/{mid_y}", "DELETE")
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

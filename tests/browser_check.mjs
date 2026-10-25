@@ -156,6 +156,58 @@ try {
   const st2 = await serverTarget().catch(() => 'ERR');
   check('server calorie_target cleared after unlock', st2 == null, `calorie_target=${st2}`);
 
+  // ---- Day browsing: prev-day navigation + past-day meal editor ----------
+  // Seed a meal on yesterday via the API (in-page fetch carries the cookie).
+  const ySeed = await evalJson(`(async () => {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const iso = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    const r = await fetch('/api/meals', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ description: 'browser-check yesterday', calories: 123, protein: 9, carbs: 12, fat: 4, date: iso }) });
+    return { status: r.status, iso };
+  })()`);
+  check('seeded meal on yesterday', ySeed.status >= 200 && ySeed.status < 300, JSON.stringify(ySeed));
+
+  await evalJson(`document.querySelector('button[data-view="today"]').click()`);
+  await sleep(800);
+  const titleToday = await evalJson(`document.getElementById('day-title').textContent`);
+  check('today header says "Today"', titleToday === 'Today', `title=${titleToday}`);
+
+  const errsB = jsErrors.length;
+  await evalJson(`document.getElementById('btn-day-prev').click()`);
+  await sleep(2500); drain();
+  check('prev-day click produced no JS error', jsErrors.length === errsB, jsErrors.slice(errsB).join(' | ').slice(0, 300));
+  const yView = await evalJson(`({date: state.date, hasMeal: state.meals.some(m => m.description === 'browser-check yesterday'),
+    nextDisabled: document.getElementById('btn-day-next').disabled})`);
+  check('viewing yesterday shows seeded meal', yView.hasMeal, JSON.stringify(yView));
+  check('next-arrow enabled on yesterday', yView.nextDisabled === false);
+
+  // Tap the meal row -> should open the review sheet in edit mode.
+  const errsC = jsErrors.length;
+  await evalJson(`(() => { const row = [...document.querySelectorAll('.meal-row')].find(r => r.textContent.includes('browser-check yesterday')); row.click(); })()`);
+  await sleep(1500); drain();
+  check('past-day tap produced no JS error', jsErrors.length === errsC, jsErrors.slice(errsC).join(' | ').slice(0, 300));
+  const sheet = await evalJson(`({open: !document.getElementById('review-sheet').hidden,
+    desc: document.getElementById('r-desc').value, kcal: document.getElementById('r-cal').value})`);
+  check('review sheet opened with the meal', sheet.open && sheet.desc === 'browser-check yesterday' && sheet.kcal === '123', JSON.stringify(sheet));
+  await evalJson(`document.getElementById('btn-cancel-review').click()`);
+
+  // Back to today via next arrow.
+  await evalJson(`document.getElementById('btn-day-next').click()`);
+  await sleep(2500);
+  const backToday = await evalJson(`({title: document.getElementById('day-title').textContent, gone: !state.meals.some(m => m.description === 'browser-check yesterday')})`);
+  check('next-arrow returns to Today without the old meal', backToday.title === 'Today' && backToday.gone, JSON.stringify(backToday));
+
+  // Cleanup: delete the seeded meal so repeated runs stay idempotent.
+  await evalJson(`(async () => {
+    const h = await fetch('/api/history?days=7').then(r=>r.json());
+    const y = h.intake.find(d => d.meals > 0 && d.date !== new Date().toISOString().slice(0,10));
+    if (!y) return null;
+    const st = await fetch('/api/state?date=' + y.date).then(r=>r.json());
+    const m = st.meals.find(mm => mm.description === 'browser-check yesterday');
+    if (m) await fetch('/api/meals/' + m.id, { method: 'DELETE' });
+    return m ? m.id : null;
+  })()`);
+
   // Screenshot for the record.
   const shot = await send('Page.captureScreenshot', { format: 'png' });
   const out = join(process.env.ML_SHOT_DIR || '.', 'settings-auto-button.png');

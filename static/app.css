@@ -104,6 +104,18 @@ input, select, button { font: inherit; color: inherit; }
 .pill.warn { border-color: #6b5320; color: #fcd34d; }
 .pill.ok { border-color: #1f4d33; color: #6ee7a8; }
 
+/* ------------------------------------------------------------- day nav */
+.day-nav { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 4px 0 2px; }
+.day-nav h2 { font-size: 15px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); min-width: 132px; text-align: center; }
+.day-nav button { line-height: 1; padding: 6px 12px; }
+/* Invisible date input overlays the title: tapping "Mon 25 Oct" opens the
+   native picker directly, no extra button needed. */
+.day-nav input[type=date] {
+  position: absolute; inset: 0; opacity: 0; border: 0; background: none;
+  color: transparent; font-size: 16px;   /* >=16px avoids iOS zoom-on-focus */
+}
+#day-title { cursor: pointer; }
+
 /* ---------------------------------------------------------------- meals */
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin: 20px 0 8px; }
 .section-head h2 { font-size: 15px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }

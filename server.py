@@ -144,7 +144,14 @@ class Api:
     def GET_state(h, q, body):
         owner = getattr(h, "owner", "default")
         s = get_settings(owner)
+        # ?date=YYYY-MM-DD browses a past day; absent/invalid = today.
         t = today_str()
+        want = (q.get("date") or [""])[0]
+        if want:
+            try:
+                t = date.fromisoformat(want[:10]).isoformat()
+            except ValueError:
+                return 400, {"error": "invalid date (use YYYY-MM-DD)"}
         meals = db.meals_for_date(t, owner)
         item_map = db.items_for_date(t, owner)
         consumed = {k: round(sum(float(m[k]) for m in meals), 1)
@@ -174,6 +181,20 @@ class Api:
         }
 
     # ---- meals --------------------------------------------------------
+    @staticmethod
+    def GET_meal(h, q, body, meal_id):
+        """One meal + its components by id (owner-scoped), so a past-day tap can
+        open the review sheet without shipping whole-day payloads."""
+        owner = getattr(h, "owner", "default")
+        try:
+            mid = int(meal_id)
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid meal id"}
+        m = db.get_meal(mid, owner)
+        if not m:
+            return 404, {"error": "meal not found"}
+        return 200, _meal_dict(m, db.items_for_meal(mid))
+
     @staticmethod
     def POST_estimate(h, q, body):
         """Photo -> estimate, preview only. Nothing is written until /meals."""
@@ -886,6 +907,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.POST_estimate(self, q, body)
             elif resource == "meals" and verb == "POST":
                 st, pl = Api.POST_meals(self, q, body)
+            elif resource == "meals" and tail and verb == "GET":
+                st, pl = Api.GET_meal(self, q, body, tail)
             elif resource == "meals" and tail and verb == "PATCH":
                 st, pl = Api.PATCH_meal(self, q, body, tail)
             elif resource == "meals" and tail and verb == "DELETE":
