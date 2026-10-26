@@ -29,7 +29,7 @@ from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           calibration_multipliers, macronutrient_targets,
                           record_correction, tdee_from_formula, weight_trend)
 from app.database import Database
-from app.vision import ProviderError, estimate_photo
+from app.vision import ProviderError, estimate_photo, estimate_text
 from app import auth as OIDC
 
 SESSION_COOKIE = "macrolog_session"
@@ -220,6 +220,31 @@ class Api:
             meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
         return 200, {"estimate": meal, "provider": provider, "model": model,
                      "calibrated": changed, "temp_photo": path}
+
+    @staticmethod
+    def POST_estimate_text(h, q, body):
+        """Text -> AI estimate for described meals. Preview only; nothing is
+        written until the client posts /meals with the returned estimate."""
+        owner = getattr(h, "owner", "default")
+        text = str(body.get("text") or "").strip()[:2000]
+        if len(text) < 3:
+            return 400, {"error": "describe your meal first"}
+        try:
+            meal, provider, model = estimate_text(text, get_settings(owner))
+        except ProviderError as e:
+            return 502, {"error": f"all providers failed: {e}"}
+        except Exception as e:
+            return 500, {"error": f"{type(e).__name__}: {e}"}
+        if not meal["items"] and not meal["calories"]:
+            return 422, {"error": meal.get("notes") or "no food recognized in that description"}
+        # NOTE: don't reuse `s` for the settings dict — it would shadow the
+        # Content-Length value computed by _json() (late-binding closure bug).
+        cur = get_settings(owner)
+        changed = False
+        if cur.get("calibrate_estimates"):
+            meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
+        return 200, {"estimate": meal, "provider": provider, "model": model,
+                     "calibrated": changed}
 
     @staticmethod
     def POST_meals(h, q, body):
@@ -905,6 +930,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.GET_state(self, q, body)
             elif resource == "estimate" and verb == "POST":
                 st, pl = Api.POST_estimate(self, q, body)
+            elif resource == "estimate-text" and verb == "POST":
+                st, pl = Api.POST_estimate_text(self, q, body)
             elif resource == "meals" and verb == "POST":
                 st, pl = Api.POST_meals(self, q, body)
             elif resource == "meals" and tail and verb == "GET":

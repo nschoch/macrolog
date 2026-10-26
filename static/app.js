@@ -63,7 +63,7 @@ const U = {
 
 // ------------------------------------------------------------------ helpers
 async function api(path, opts = {}) {
-  const res = await fetch('/api/' + path, opts);
+  const res = await fetchWithTimeout('/api/' + path, opts);
   let data = {};
   try { data = await res.json(); } catch (_) { /* empty body */ }
   if (res.status === 401 && data.login) {
@@ -73,6 +73,22 @@ async function api(path, opts = {}) {
   }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+// Hard deadline for every API call: a wedged service worker (seen with
+// headless Chrome + SW-controlled pages) can hang fetches forever; without a
+// timeout the UI just sits on the spinner and never recovers.
+async function fetchWithTimeout(url, opts = {}, ms = 25000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctl.signal });
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error('Server not responding — check it is running, then retry.');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function toast(msg, isErr = false) {
@@ -130,6 +146,10 @@ function renderDayHeader(day) {
   $('btn-day-next').disabled = isoShift(day, 1) > todayISO();
   const pick = $('day-pick');
   pick.value = day; pick.max = todayISO();
+  // Keep the (hidden) input parked under the title so when Safari anchors its
+  // native picker to the input's rect, it appears there — not bottom-left.
+  const r = el.getBoundingClientRect();
+  pick.style.top = Math.round(r.top + window.scrollY - 6) + 'px';
 }
 
 $('btn-day-prev').addEventListener('click', () => {
@@ -141,6 +161,21 @@ $('btn-day-next').addEventListener('click', () => {
   const d = isoShift(state?.date || todayISO(), 1);
   if (d >= todayISO()) { viewDate = ''; refresh(); return; }
   viewDate = d; refresh();
+});
+// Tapping the date title opens the native picker. showPicker() (Chrome 99+,
+// Safari 16+) anchors at the input's rect, which we park under the title.
+// Fallback for older Safari: unhide briefly and focus — iOS still needs a tap
+// inside the input itself to raise the wheel, so the title doubles as a hint.
+$('day-title').addEventListener('click', () => {
+  const pick = $('day-pick');
+  const r = $('day-title').getBoundingClientRect();
+  pick.style.top = Math.round(r.top + window.scrollY - 6) + 'px';
+  if (typeof pick.showPicker === 'function') {
+    try { pick.showPicker(); return; } catch (_) { /* outside a gesture or unsupported */ }
+  }
+  pick.style.opacity = '0.999'; pick.style.pointerEvents = 'auto';
+  pick.focus();
+  setTimeout(() => { pick.style.opacity = ''; pick.style.pointerEvents = ''; }, 400);
 });
 $('day-pick').addEventListener('change', (e) => {
   const d = e.target.value;
@@ -299,7 +334,7 @@ $('file-input').addEventListener('change', async (e) => {
   try {
     const form = new FormData();
     form.append('photo', file, file.name || 'meal.jpg');
-    const res = await fetch('/api/estimate', { method: 'POST', body: form });
+    const res = await fetchWithTimeout('/api/estimate', { method: 'POST', body: form }, 60000);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Estimate failed');
     pendingPhoto = data.temp_photo;
@@ -384,6 +419,8 @@ function renderCompEditor() {
 function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl, editingId }) {
   const e = estimate || {};
   $('review-sheet').dataset.editing = editingId || '';
+  // 'photo' covers camera shots; typed descriptions have no image.
+  $('review-sheet').dataset.source = previewUrl || photoUrl ? 'photo' : 'text';
   $('r-desc').value = e.description || '';
   compItems = (e.items || []).map(i => ({ ...i }));
   // Manual totals as fallback when there are no components.
@@ -401,8 +438,10 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   const src = previewUrl || photoUrl;
   img.src = src || '';
   img.style.display = src ? 'block' : 'none';
+  // "Choose different photo" only makes sense when a photo is involved — hide
+  // it when editing an existing meal or for text-described meals (no image).
   const pa = document.querySelector('.photo-actions');
-  if (pa) pa.style.display = editingId ? 'none' : 'block';
+  if (pa) pa.style.display = (editingId || !src) ? 'none' : 'block';
 
   renderCompEditor();
 
@@ -436,7 +475,10 @@ $('btn-add-item').addEventListener('click', () => {
 
 function closeSheets() {
   $('review-sheet').hidden = true;
+  $('review-sheet').dataset.editing = '';
+  $('review-sheet').dataset.source = '';
   $('manual-sheet').hidden = true;
+  $('describe-sheet').hidden = true;
   document.body.style.overflow = '';
 }
 
@@ -451,7 +493,7 @@ $('btn-save-review').addEventListener('click', async () => {
     kind: $('r-kind').value,
     date: $('r-date').value || viewDate || undefined,
     time: $('r-time').value || undefined,
-    source: 'photo',
+    source: $('review-sheet').dataset.source === 'text' ? 'text' : 'photo',
   };
   if (cleanComps.length) {
     payload.items = cleanComps;
@@ -517,6 +559,37 @@ $('btn-save-manual').addEventListener('click', async () => {
     toast('Logged');
     await refresh();
   } catch (err) { toast(err.message, true); }
+});
+
+// ------------------------------------------------------------- describe meal
+// Text -> AI estimate. The result feeds the SAME review sheet as photos, so
+// per-item grams/macros are editable before saving and land on viewDate.
+$('btn-describe').addEventListener('click', () => {
+  $('describe-sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+  // No .focus(): iOS ignores it for <textarea> and Safari's autofill overlay
+  // covers Cancel/Estimate while the field is focused with an empty value.
+  // The placeholder makes the empty state obvious instead.
+});
+$('btn-cancel-describe').addEventListener('click', closeSheets);
+$('describe-sheet').addEventListener('click', (e) => { if (e.target.id === 'describe-sheet') closeSheets(); });
+
+$('btn-estimate-text').addEventListener('click', async () => {
+  const text = $('d-text').value.trim();
+  if (!text) { toast('Describe your meal first', true); return; }
+  loading(true, 'Estimating from description…');
+  try {
+    const data = await api('estimate-text', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    $('describe-sheet').hidden = true;
+    openReview({ ...data });   // no photo; pendingPhoto stays null
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    loading(false);
+  }
 });
 
 // -------------------------------------------------------------------- weight
@@ -832,6 +905,16 @@ window.addEventListener('resize', () => {
 
 refresh();
 
+// One-shot SW install: register only when nothing exists yet. A page reload
+// re-registers the same script, which can leave Chrome's headless SW with a
+// wedged fetch dispatcher (observed: every POST hangs forever).
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.getRegistration().then((reg) => {
+    if (!reg) { navigator.serviceWorker.register('/sw.js').catch(() => {}); return; }
+    // If an update is pending or the controlling worker predates this build,
+    // drop it and register fresh — a half-dead worker wedges all fetches.
+    if (reg.waiting || reg.installing) {
+      reg.unregister().then(() => navigator.serviceWorker.register('/sw.js')).catch(() => {});
+    }
+  });
 }

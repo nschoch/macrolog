@@ -108,13 +108,25 @@ input, select, button { font: inherit; color: inherit; }
 .day-nav { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 4px 0 2px; }
 .day-nav h2 { font-size: 15px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); min-width: 132px; text-align: center; }
 .day-nav button { line-height: 1; padding: 6px 12px; }
-/* Invisible date input overlays the title: tapping "Mon 25 Oct" opens the
-   native picker directly, no extra button needed. */
+/* The <input type=date> is NOT a click proxy for the title. Safari anchors its
+   native picker to the input's own rect, so the earlier full-bleed overlay
+   (position:absolute; inset:0 under a non-positioned parent) resolved to the
+   viewport's bottom-left corner — the calendar popped up there whenever a
+   nearby arrow was tapped. Now it is invisible, click-through and pinned under
+   the title at real size, so the picker opens where the title is. */
 .day-nav input[type=date] {
-  position: absolute; inset: 0; opacity: 0; border: 0; background: none;
-  color: transparent; font-size: 16px;   /* >=16px avoids iOS zoom-on-focus */
+  position: fixed; left: 50%; transform: translateX(-50%);
+  width: 140px; height: 44px; margin: 0; padding: 0;
+  opacity: 0; border: 0; background: none; pointer-events: none;
+  font-size: 16px;                        /* >=16px avoids iOS zoom-on-focus */
 }
-#day-title { cursor: pointer; }
+#day-title { cursor: pointer; user-select: none; }
+
+/* ------------------------------------------------------- describe & heads */
+.head-btns { display: flex; gap: 8px; }
+#d-text { width: 100%; box-sizing: border-box; background: var(--panel-2); color: inherit;
+  border: 1px solid var(--line, #2a2f3a); border-radius: 10px; padding: 10px; font: inherit;
+  font-size: 15px; resize: vertical; min-height: 84px; margin-bottom: 12px; }
 
 /* ---------------------------------------------------------------- meals */
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin: 20px 0 8px; }

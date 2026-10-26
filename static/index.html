@@ -48,7 +48,10 @@
 
     <div class="section-head">
       <h2>Meals</h2>
-      <button class="ghost" id="btn-manual">+ Manual</button>
+      <span class="head-btns">
+        <button class="ghost" id="btn-describe">+ Describe</button>
+        <button class="ghost" id="btn-manual">+ Manual</button>
+      </span>
     </div>
     <ul class="meal-list" id="meal-list"></ul>
     <p class="empty" id="meals-empty" hidden>No meals logged yet. Tap the camera to start.</p>
@@ -184,6 +187,18 @@
 </div>
 
 <!-- ========================= MANUAL ENTRY SHEET ====================== -->
+<div class="sheet-backdrop" id="describe-sheet" hidden>
+  <div class="sheet">
+    <div class="sheet-grab"></div>
+    <h3>Describe your meal</h3>
+    <textarea id="d-text" rows="4" placeholder="e.g. 100g of rice and 100g of cooked 85% lean ground beef"></textarea>
+    <div class="sheet-btns">
+      <button class="ghost" id="btn-cancel-describe">Cancel</button>
+      <button class="primary" id="btn-estimate-text">Estimate</button>
+    </div>
+  </div>
+</div>
+
 <div class="sheet-backdrop" id="manual-sheet" hidden>
   <div class="sheet">
     <div class="sheet-grab"></div>

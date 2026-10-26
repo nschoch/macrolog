@@ -208,6 +208,29 @@ st, _ = req("/api/meals/999999")
 check("GET unknown meal -> 404", st == 404, str(st))
 st, _ = req(f"/api/meals/{mid_y}", "DELETE")
 
+# 18. text->AI estimate (describe-a-meal)
+st, te = req("/api/estimate-text", "POST", {"text": "100g of rice and 100g of cooked 85% lean ground beef"})
+est2 = te.get("estimate", {})
+check("estimate-text 200", st == 200, str(te)[:120])
+check("estimate-text has items", len(est2.get("items", [])) >= 2, str(est2.get("items"))[:150])
+check("estimate-text totals positive", est2.get("calories", 0) > 0 and est2.get("protein", 0) > 0, str(est2.get("calories")))
+st, _ = req("/api/estimate-text", "POST", {"text": ""})
+check("estimate-text empty -> 400", st == 400, str(st))
+st, _ = req("/api/estimate-text", "POST", {"text": "ab"})
+check("estimate-text too short -> 400", st == 400, str(st))
+# save one from the estimate and confirm it lands with source=text
+if est2.get("calories"):
+    st, mm = req("/api/meals", "POST", {"description": est2.get("description", "text meal"),
+        "calories": est2["calories"], "protein": est2["protein"], "carbs": est2["carbs"],
+        "fat": est2["fat"], "source": "text", "items": est2.get("items", [])})
+    mid_t = (mm or {}).get("id")
+    check("save text-estimated meal", st in (200, 201) and mid_t, str(st))
+    if mid_t:
+        st, one = req(f"/api/meals/{mid_t}")
+        check("text meal carries source + components", one.get("source") == "text"
+              and len(one.get("items", [])) >= 2, f"{one.get('source')} items={len(one.get('items', []))}")
+        req(f"/api/meals/{mid_t}", "DELETE")
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))

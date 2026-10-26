@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import os
 import urllib.error
 import urllib.request
@@ -54,6 +55,37 @@ portion depth is ambiguous.
 rice bowl with avocado".
 - If there is no recognizable food, return items: [] with confidence 0 and \
 describe what you see in notes.
+"""
+
+TEXT_PROMPT = """You are a dietitian estimating nutrition from a text \
+description of a meal or its ingredients.
+
+Parse the description into distinct food items. Honor amounts as written \
+("100g of rice", "a medium banana", "2 slices"); when none is given, assume \
+a sensible standard portion and say so in notes. Use cooked weights unless \
+the wording clearly refers to raw/package form. For each item report absolute \
+amounts for the WHOLE portion (not per 100g), including fiber inside carbs.
+
+Return ONLY a JSON object, no markdown fences, exactly this shape:
+{
+  "items": [
+    {"name": str, "grams": number, "calories": number,
+     "protein": number, "carbs": number, "fat": number}
+  ],
+  "total_calories": number, "total_protein": number,
+  "total_carbs": number, "total_fat": number,
+  "confidence": number,
+  "description": str,
+  "notes": str
+}
+
+Rules:
+- total_* must equal the sum of the item values.
+- confidence 0.0-1.0: high when amounts and foods are explicit; low when you \
+had to guess portions or identify vague items ("some sauce").
+- description: one short human phrase for the whole meal.
+- If the text contains no recognizable food, return items: [] with \
+confidence 0 and explain in notes.
 """
 
 
@@ -103,6 +135,12 @@ def _post(url: str, payload: dict, headers: dict, timeout: int = 90) -> dict:
         raise ProviderError(f"HTTP {e.code}: {body}") from None
     except urllib.error.URLError as e:
         raise ProviderError(f"network: {e.reason}") from None
+
+
+def _get_json(url: str, headers: dict, timeout: int = 45) -> dict:
+    req = urllib.request.Request(url, headers={**headers})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
 
 
 def _extract_json(text: str) -> dict:
@@ -210,6 +248,30 @@ class GeminiProvider:
         return _extract_json(text)
 
 
+    def estimate_text(self, text: str) -> dict:
+        if not self.key:
+            raise ProviderError("Gemini API key not set")
+        url = f"{self.base}/v1beta/models/{self.model}:generateContent"
+        # Text-only calls answer in seconds; don't inherit the image timeout.
+        url_try = url
+        try:
+            data = _post(url_try, {
+                "contents": [{"parts": [{"text": TEXT_PROMPT + "\n\nMeal description:\n" + text}]}],
+                "generationConfig": {"temperature": 0.1,
+                                     "responseMimeType": "application/json"},
+            }, {"x-goog-api-key": self.key}, timeout=45)
+        except urllib.error.HTTPError as e:
+            if e.code != 405:
+                raise
+            # Some gateways only accept GET:generateContent with a JSON body.
+            data = _get_json(url_try, {"x-goog-api-key": self.key})
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError):
+            raise ProviderError(f"unexpected reply: {json.dumps(data)[:250]}") from None
+        return _extract_json("".join(p.get("text", "") for p in parts))
+
+
 class OpenAICompatProvider:
     """Any OpenAI-compatible /chat/completions endpoint that accepts images.
 
@@ -262,6 +324,26 @@ class OpenAICompatProvider:
             raise ProviderError(f"unexpected reply: {json.dumps(data)[:250]}") from None
         return _extract_json(text)
 
+    def estimate_text(self, text: str) -> dict:
+        if not self.key:
+            raise ProviderError(f"{self.name} API key not set")
+        payload = {
+            "model": self.model,
+            "temperature": 0.1,
+            "max_tokens": 1500,
+            "messages": [{"role": "user", "content":
+                          TEXT_PROMPT + "\n\nMeal description:\n" + text}],
+        }
+        if self.name not in ("groq", "qwenplan"):
+            payload["response_format"] = {"type": "json_object"}
+        data = _post(f"{self.base}/chat/completions", payload,
+                     {"Authorization": f"Bearer {self.key}"}, timeout=45)
+        try:
+            out = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            raise ProviderError(f"unexpected reply: {json.dumps(data)[:250]}") from None
+        return _extract_json(out)
+
 
 class OllamaProvider:
     """Local vision model through Ollama. No account, no network egress."""
@@ -284,6 +366,17 @@ class OllamaProvider:
         if not text:
             raise ProviderError(f"empty reply: {json.dumps(data)[:200]}")
         return _extract_json(text)
+
+    def estimate_text(self, text: str) -> dict:
+        payload = {"model": self.model, "raw": True, "stream": False,
+                   "format": "json", "options": {"temperature": 0.1},
+                   "messages": [{"role": "user",
+                                 "content": TEXT_PROMPT + "\n\nMeal description:\n" + text}]}
+        data = _post(f"{self.base}/api/chat", payload, {}, timeout=300)
+        out = (data.get("message") or {}).get("content", "")
+        if not out:
+            raise ProviderError(f"empty reply: {json.dumps(data)[:200]}")
+        return _extract_json(out)
 
 
 class StubProvider:
@@ -308,6 +401,26 @@ class StubProvider:
             "confidence": 0.15,
             "description": "Offline placeholder estimate",
             "notes": "No vision provider configured. Add an API key in Settings.",
+        }
+
+    def estimate_text(self, text: str) -> dict:
+        """Offline fallback: split on commas/newlines/"and", one flat item per
+        fragment with a fixed 250 kcal split. Deterministic so tests can assert
+        the shape without any network."""
+        # Non-capturing split: a capturing group would inject the matched "and"
+        # separators into the fragment list as pseudo-items.
+        frags = [f.strip(" .;") for f in re.split(r",|\n|\s+and\s+", text) if f.strip(" .;")]
+        frags = frags[:8] or ["Described meal"]
+        each = round(250.0 * len(frags), 1)
+        items = [{"name": f[:60], "grams": 0, "calories": 250.0,
+                  "protein": 12.5, "carbs": 28.0, "fat": 11.0} for f in frags]
+        return {
+            "items": items,
+            "total_calories": each, "total_protein": 12.5 * len(frags),
+            "total_carbs": 28.0 * len(frags), "total_fat": 11.0 * len(frags),
+            "confidence": 0.15,
+            "description": (text[:60] or "Offline placeholder"),
+            "notes": "Text estimate by offline stub — add a provider key for real numbers.",
         }
 
 
@@ -380,12 +493,13 @@ def build_chain(settings: dict) -> list:
     return chain
 
 
-def estimate_photo(image_path: str, settings: dict) -> tuple[dict, str, str]:
-    """Try each provider in order. Returns (meal_dict, provider, model)."""
+def _run_chain(call, settings: dict) -> tuple[dict, str, str]:
+    """Try each provider in order with call(provider); returns
+    (meal_dict, provider_name, model). Shared by photo and text paths."""
     errors = []
     for prov in build_chain(settings):
         try:
-            raw = prov.estimate(image_path)
+            raw = call(prov)
             meal = normalize(raw)
             meal["_raw"] = raw
             model = getattr(prov, "model", prov.name)
@@ -393,3 +507,13 @@ def estimate_photo(image_path: str, settings: dict) -> tuple[dict, str, str]:
         except Exception as e:
             errors.append(f"{prov.name}: {type(e).__name__}: {str(e)[:180]}")
     raise ProviderError(" | ".join(errors) or "no providers configured")
+
+
+def estimate_photo(image_path: str, settings: dict) -> tuple[dict, str, str]:
+    """Try each provider in order. Returns (meal_dict, provider, model)."""
+    return _run_chain(lambda p: p.estimate(image_path), settings)
+
+
+def estimate_text(text: str, settings: dict) -> tuple[dict, str, str]:
+    """Describe-a-meal path: same chain, text-only prompts."""
+    return _run_chain(lambda p: p.estimate_text(text), settings)

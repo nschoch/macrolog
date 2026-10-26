@@ -89,6 +89,71 @@ try {
   await send('Runtime.enable');
   await send('Log.enable');
   await send('Network.enable');
+  // Fresh browser context: start from a clean SW slate so the app registers
+  // exactly once (see app.js note about Chrome's wedged-SW failure mode).
+  await evalJson(`navigator.serviceWorker.getRegistrations ? navigator.serviceWorker.getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())).then(() => 'sw cleared') : 'n/a')`).catch(() => {});
+
+  // Disable service-worker registration for this run. Root cause of the
+  // endless hangs we chased: headless Chrome ends up with an ACTIVE but
+  // non-responsive SW for this origin (proven — postMessage gets no reply and
+  // handler-triggered POSTs never reach the server, while identical fetches
+  // from the console succeed). The SW only provides offline caching; it is not
+  // what these checks exercise, and a wedged worker makes every POST hang.
+  // Stubbing registration before any document script runs removes the whole
+  // failure class and makes runs deterministic.
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `try {
+      Object.defineProperty(navigator, 'serviceWorker', {
+        configurable: true,
+        value: { register: () => Promise.reject(new Error('sw disabled for test')),
+                 getRegistration: () => Promise.resolve(undefined),
+                 getRegistrations: () => Promise.resolve([]),
+                 addEventListener: () => {}, removeEventListener: () => {},
+                 controller: null, ready: new Promise(() => {}) },
+      });
+    } catch (_) {}`,
+  });
+
+  // Stall detector: wrap window.fetch to track in-flight requests. If one has
+  // been outstanding >5s, the watchdog recovers the page (belt and braces —
+  // with the SW stubbed out this should never trigger).
+  const installWatchdog = () => evalJson(`(() => {
+    if (window.__wd) return 'already';
+    window.__wd = { inflight: new Map(), released: 0 };
+    const of = window.fetch.bind(window);
+    window.fetch = function(u, o) {
+      const key = String(u) + '#x';
+      window.__wd.inflight.set(key, Date.now());
+      return of(u, o).finally(() => window.__wd.inflight.delete(key));
+    };
+    return 'installed';
+  })()`);
+  const waitForBoot = async (ms = 20000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      await sleep(400);
+      const ok = await evalJson(`typeof state !== 'undefined' && !!state`).catch(() => false);
+      if (ok) return true;
+    }
+    return false;
+  };
+  const watchdog = async () => {
+    let stuckUrls = [];
+    try {
+      stuckUrls = await evalJson(`[...window.__wd.inflight.entries()].filter(([,t])=>Date.now()-t>5000).map(([k])=>k.split('#')[0])`);
+    } catch { return; }
+    if (!stuckUrls.length) return;
+    console.log('[harness] watchdog: stalled ' + stuckUrls.join(',') + ' — aborting & reloading');
+    // Headless-Chrome wedge: an aborted-then-retried POST to the same URL can
+    // hang forever in the renderer. Unregistering the SW releases (aborts) the
+    // in-flight fetches so handlers unwind; a reload resets per-page UI state.
+    await evalJson(`(async()=>{const rs=await navigator.serviceWorker.getRegistrations();await Promise.all(rs.map(r=>r.unregister()))})()`).catch(() => {});
+    await sleep(800);
+    await send('Page.navigate', { url: BASE });
+    if (!await waitForBoot()) throw new Error('page failed to re-boot after watchdog reload');
+    await installWatchdog();
+    await sleep(300); drain();
+  };
   if (COOKIE) {
     await send('Network.setCookie', { name: 'macrolog_session', value: COOKIE, url: BASE, path: '/' });
   }
@@ -117,7 +182,9 @@ try {
     if (i === 5) console.log('mid-boot location:', await evalJson(`location.href`).catch(() => '?'));
   }
   if (!booted) throw new Error('app never booted (state stayed null) — check auth/redirect');
-  await sleep(1000); drain();
+  await sleep(1000);
+  await installWatchdog();
+  await sleep(200); drain();   // drop any events from setup before baseline
   check('initial load has no JS errors', jsErrors.length === 0, jsErrors.join(' | ').slice(0, 300));
 
   // Switch to Settings view.
@@ -135,7 +202,7 @@ try {
   // Click 1: auto -> lock (server pins 2200 fallback when target was null? see code: locks at s.calorie_target || 2200)
   const errsBefore = jsErrors.length;
   await evalJson(`document.getElementById('btn-unlock').click()`);
-  await sleep(2500); drain();
+  await sleep(2500); await watchdog(); drain();
   check('click #1 produced no JS error', jsErrors.length === errsBefore, jsErrors.slice(errsBefore).join(' | ').slice(0, 300));
   let s1 = await btnState();
   check('after click #1 button shows "locked"', s1.label === 'locked', `label=${s1.label} targetVal=${s1.targetVal}`);
@@ -148,7 +215,7 @@ try {
   // Click 2: locked -> auto.
   const errsBefore2 = jsErrors.length;
   await evalJson(`document.getElementById('btn-unlock').click()`);
-  await sleep(2500); drain();
+  await sleep(2500); await watchdog(); drain();
   check('click #2 produced no JS error', jsErrors.length === errsBefore2, jsErrors.slice(errsBefore2).join(' | ').slice(0, 300));
   let s2 = await btnState();
   check('after click #2 button shows "auto"', s2.label === 'auto', `label=${s2.label}`);
@@ -174,7 +241,7 @@ try {
 
   const errsB = jsErrors.length;
   await evalJson(`document.getElementById('btn-day-prev').click()`);
-  await sleep(2500); drain();
+  await sleep(2500); await watchdog(); drain();
   check('prev-day click produced no JS error', jsErrors.length === errsB, jsErrors.slice(errsB).join(' | ').slice(0, 300));
   const yView = await evalJson(`({date: state.date, hasMeal: state.meals.some(m => m.description === 'browser-check yesterday'),
     nextDisabled: document.getElementById('btn-day-next').disabled})`);
@@ -184,7 +251,7 @@ try {
   // Tap the meal row -> should open the review sheet in edit mode.
   const errsC = jsErrors.length;
   await evalJson(`(() => { const row = [...document.querySelectorAll('.meal-row')].find(r => r.textContent.includes('browser-check yesterday')); row.click(); })()`);
-  await sleep(1500); drain();
+  await sleep(1500); await watchdog(); drain();
   check('past-day tap produced no JS error', jsErrors.length === errsC, jsErrors.slice(errsC).join(' | ').slice(0, 300));
   const sheet = await evalJson(`({open: !document.getElementById('review-sheet').hidden,
     desc: document.getElementById('r-desc').value, kcal: document.getElementById('r-cal').value})`);
@@ -193,7 +260,7 @@ try {
 
   // Back to today via next arrow.
   await evalJson(`document.getElementById('btn-day-next').click()`);
-  await sleep(2500);
+  await sleep(2500); await watchdog();
   const backToday = await evalJson(`({title: document.getElementById('day-title').textContent, gone: !state.meals.some(m => m.description === 'browser-check yesterday')})`);
   check('next-arrow returns to Today without the old meal', backToday.title === 'Today' && backToday.gone, JSON.stringify(backToday));
 
@@ -207,6 +274,59 @@ try {
     if (m) await fetch('/api/meals/' + m.id, { method: 'DELETE' });
     return m ? m.id : null;
   })()`);
+
+  // ---- Describe-a-meal: text -> AI estimate -> editable review sheet ------
+  await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
+    if (typeof closeSheets === 'function') closeSheets(); })()`);
+  await sleep(800); drain();
+  const errsD = jsErrors.length;
+  await evalJson(`document.getElementById('btn-describe').click()`);
+  await sleep(400); drain();
+  check('describe sheet opens', await evalJson(`!document.getElementById('describe-sheet').hidden`));
+  await evalJson(`(() => { const t = document.getElementById('d-text');
+    t.value = '100g of rice and 100g of cooked 85% lean ground beef'; })()`);
+  await evalJson(`document.getElementById('btn-estimate-text').click()`);
+  await sleep(3500); await watchdog(); drain();
+  check('estimate produced no JS error', jsErrors.length === errsD, jsErrors.slice(errsD).join(' | ').slice(0, 300));
+  const readRev = () => evalJson(`({open: !document.getElementById('review-sheet').hidden,
+    desc: document.getElementById('r-desc').value,
+    nItems: typeof compItems !== 'undefined' ? compItems.length : -1,
+    src: document.getElementById('review-sheet').dataset.source})`);
+  let rev = await readRev();
+  for (let attempt = 1; !rev.open && attempt <= 3; attempt++) {
+    // After a watchdog reload the sheets are closed and the textarea empty:
+    // redo the whole describe interaction.
+    console.log(`[harness] review not open (attempt ${attempt}) — repeating describe interaction`);
+    await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
+      document.getElementById('btn-describe').click(); })()`);
+    await sleep(400);
+    await evalJson(`document.getElementById('d-text').value = '100g of rice and 100g of cooked 85% lean ground beef'`);
+    await evalJson(`document.getElementById('btn-estimate-text').click()`);
+    await sleep(3500); await watchdog(); drain();
+    rev = await readRev();
+  }
+  check('review sheet shows text estimate with components', rev.open && rev.nItems >= 2 && rev.src === 'text', JSON.stringify(rev));
+
+  // Save it and confirm it appears in today's list tagged text.
+  const errsE = jsErrors.length;
+  await evalJson(`document.getElementById('btn-save-review').click()`);
+  await sleep(2500); await watchdog(); drain();
+  check('saving text meal produced no JS error', jsErrors.length === errsE, jsErrors.slice(errsE).join(' | ').slice(0, 300));
+  const saved = await evalJson(`(async () => {
+    const r = await fetch('/api/state').then(x=>x.json());
+    return r.meals.filter(m=>m.source==='text').map(m=>({id:m.id,n:(m.items||[]).length}))})()`);
+  check('text meal visible on Today with components', Array.isArray(saved) && saved.length >= 1 && saved[0].n >= 2, JSON.stringify(saved));
+  if (Array.isArray(saved)) for (const m of saved) await evalJson(`fetch('/api/meals/'+${m.id},{method:'DELETE'})`);
+  // ---- Day-nav: arrows must not raise a native date picker (Safari bug) ----
+  const pickerRaised = await evalJson(`(() => {
+    let raised = false;
+    const pick = document.getElementById('day-pick');
+    const origFocus = pick.focus.bind(pick);
+    pick.focus = () => { raised = true; };
+    document.getElementById('btn-day-prev').click();
+    pick.focus = origFocus;
+    return raised; })()`);
+  check('prev-arrow does not trigger date picker', pickerRaised === false);
 
   // Screenshot for the record.
   const shot = await send('Page.captureScreenshot', { format: 'png' });
