@@ -338,7 +338,6 @@ $('file-input').addEventListener('change', async (e) => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Estimate failed');
     pendingPhoto = data.temp_photo;
-    if (data.warning) toast(data.warning, true);
     openReview({ ...data, previewUrl: dataUrl });
   } catch (err) {
     toast(err.message, true);
@@ -591,8 +590,7 @@ $('btn-estimate-text').addEventListener('click', async () => {
       body: JSON.stringify({ text }),
     });
     $('describe-sheet').hidden = true;
-    if (data.warning) toast(data.warning, true);
-    openReview({ ...data });   // no photo; pendingPhoto stays null
+    openReview({ ...data });   // warning (if any) shows as a banner in the sheet
   } catch (err) {
     toast(err.message, true);
   } finally {
