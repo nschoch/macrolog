@@ -495,13 +495,20 @@ def build_chain(settings: dict) -> list:
 
 def _run_chain(call, settings: dict) -> tuple[dict, str, str]:
     """Try each provider in order with call(provider); returns
-    (meal_dict, provider_name, model). Shared by photo and text paths."""
+    (meal_dict, provider_name, model). Shared by photo and text paths.
+
+    If a real provider failed and we ended up on the offline stub, the earlier
+    failures ride along in meal["_provider_errors"] so callers can tell the user
+    *why* the numbers are placeholders instead of silently serving fake ones.
+    """
     errors = []
     for prov in build_chain(settings):
         try:
             raw = call(prov)
             meal = normalize(raw)
             meal["_raw"] = raw
+            if prov.name == "stub" and errors:
+                meal["_provider_errors"] = errors
             model = getattr(prov, "model", prov.name)
             return meal, prov.name, model
         except Exception as e:

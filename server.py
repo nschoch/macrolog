@@ -218,8 +218,12 @@ class Api:
         changed = False
         if s.get("calibrate_estimates"):
             meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
-        return 200, {"estimate": meal, "provider": provider, "model": model,
-                     "calibrated": changed, "temp_photo": path}
+        out = {"estimate": meal, "provider": provider, "model": model,
+               "calibrated": changed, "temp_photo": path}
+        errs = meal.get("_provider_errors")
+        if errs:
+            out["warning"] = _provider_warning(errs)
+        return 200, out
 
     @staticmethod
     def POST_estimate_text(h, q, body):
@@ -243,8 +247,12 @@ class Api:
         changed = False
         if cur.get("calibrate_estimates"):
             meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
-        return 200, {"estimate": meal, "provider": provider, "model": model,
-                     "calibrated": changed}
+        out = {"estimate": meal, "provider": provider, "model": model,
+               "calibrated": changed}
+        errs = meal.get("_provider_errors")
+        if errs:
+            out["warning"] = _provider_warning(errs)
+        return 200, out
 
     @staticmethod
     def POST_meals(h, q, body):
@@ -633,6 +641,23 @@ def _parse_when(body: dict, default_date: str, fallback_ts: int | None = None) -
         return int(datetime(dt.year, dt.month, dt.day, base.hour, base.minute).timestamp())
     now = datetime.now()
     return int(datetime(dt.year, dt.month, dt.day, now.hour, now.minute).timestamp())
+
+
+def _provider_warning(errors: list) -> str:
+    """Short, human-readable reason the real providers were skipped."""
+    blob = " ".join(errors)
+    if "insufficient_quota" in blob or "quota" in blob.lower():
+        return ("Your vision provider's quota is exhausted, so this is an "
+                "offline placeholder estimate — not real nutrition data. "
+                "Editing it now would train the calibrator on fake numbers.")
+    if "429" in blob:
+        return ("Your vision provider is rate-limiting requests, so this is an "
+                "offline placeholder estimate — not real nutrition data.")
+    if "401" in blob or "403" in blob:
+        return ("Your vision provider rejected the API key, so this is an "
+                "offline placeholder estimate — not real nutrition data.")
+    return ("No vision provider answered (" + errors[0][:120] + "), so this is "
+            "an offline placeholder estimate — not real nutrition data.")
 
 
 def _exercise_total(d: str, owner: str = "default") -> float:

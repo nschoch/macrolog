@@ -214,6 +214,12 @@ est2 = te.get("estimate", {})
 check("estimate-text 200", st == 200, str(te)[:120])
 check("estimate-text has items", len(est2.get("items", [])) >= 2, str(est2.get("items"))[:150])
 check("estimate-text totals positive", est2.get("calories", 0) > 0 and est2.get("protein", 0) > 0, str(est2.get("calories")))
+# With a real key configured but failing/quota-limited, the server must say so
+# instead of silently serving placeholder numbers. The stub path in this suite
+# is pinned, so assert the contract only when a warning is present.
+check("estimate-text warning field is a string when present",
+      te.get("warning") is None or isinstance(te.get("warning"), str),
+      str(te.get("warning"))[:80])
 st, _ = req("/api/estimate-text", "POST", {"text": ""})
 check("estimate-text empty -> 400", st == 400, str(st))
 st, _ = req("/api/estimate-text", "POST", {"text": "ab"})

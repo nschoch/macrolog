@@ -122,6 +122,15 @@ input, select, button { font: inherit; color: inherit; }
 }
 #day-title { cursor: pointer; user-select: none; }
 
+/* Fallback warning inside the review sheet: a full sentence, so it must wrap
+   (the .pill component is a single-line capsule and would clip it). */
+#r-warn {
+  display: block; margin: 10px 0 12px; padding: 10px 12px;
+  background: rgba(252, 211, 77, .08); border: 1px solid #6b5320;
+  border-radius: 10px; color: #fcd34d; font-size: 13px; line-height: 1.45;
+}
+#r-warn[hidden] { display: none; }
+
 /* ------------------------------------------------------- describe & heads */
 .head-btns { display: flex; gap: 8px; }
 #d-text { width: 100%; box-sizing: border-box; background: var(--panel-2); color: inherit;

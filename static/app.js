@@ -338,6 +338,7 @@ $('file-input').addEventListener('change', async (e) => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Estimate failed');
     pendingPhoto = data.temp_photo;
+    if (data.warning) toast(data.warning, true);
     openReview({ ...data, previewUrl: dataUrl });
   } catch (err) {
     toast(err.message, true);
@@ -416,7 +417,7 @@ function renderCompEditor() {
   refreshTotals();
 }
 
-function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl, editingId }) {
+function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl, editingId, warning }) {
   const e = estimate || {};
   $('review-sheet').dataset.editing = editingId || '';
   // 'photo' covers camera shots; typed descriptions have no image.
@@ -446,6 +447,12 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   renderCompEditor();
 
   const conf = Math.round((e.confidence ?? 0.5) * 100);
+  const warn = $('r-warn');
+  if (warn) {
+    warn.textContent = warning || '';
+    warn.hidden = !warning;
+  }
+
   $('r-prov').innerHTML = `${cap(provider || 'manual')}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
 
   $('review-sheet').hidden = false;
@@ -584,6 +591,7 @@ $('btn-estimate-text').addEventListener('click', async () => {
       body: JSON.stringify({ text }),
     });
     $('describe-sheet').hidden = true;
+    if (data.warning) toast(data.warning, true);
     openReview({ ...data });   // no photo; pendingPhoto stays null
   } catch (err) {
     toast(err.message, true);
