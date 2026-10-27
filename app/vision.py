@@ -292,10 +292,17 @@ class OpenAICompatProvider:
             # Override host with QWENPLAN_BASE_URL (token-plan.maas.* hosts vary by region).
             "qwenplan": (os.environ.get("QWENPLAN_BASE_URL")
                      or "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                     os.environ.get("QWENPLAN_MODEL", "qwen3.8-max")),
+                     os.environ.get("QWENPLAN_MODEL", "qwen3.8-flash")),
         }
         base, model = defaults.get(name, ("", "gpt-4o-mini"))
         self.base = (cfg.get("base_url") or base).rstrip("/")
+        # Resolution order: explicit per-provider config > QWENPLAN_MODEL env >
+        # built-in default. The env var must beat the *default*, not merely set
+        # `model`, because the provider list is persisted in the settings DB —
+        # without this, a stale stored "qwen3.8-max" silently defeats an
+        # operator editing .env. So drop the stored value when env is set.
+        if name == "qwenplan" and os.environ.get("QWENPLAN_MODEL"):
+            cfg = {k: v for k, v in cfg.items() if k != "model"}
         self.model = cfg.get("model", model)
 
     def estimate(self, image_path: str) -> dict:

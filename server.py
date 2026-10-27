@@ -57,7 +57,7 @@ DEFAULT_SETTINGS = {
     "calibrate_estimates": True,
     # Provider chain, tried in order. First entry wins; missing keys are skipped.
     "providers": [
-        {"kind": "qwenplan", "model": "qwen3.8-max"},
+        {"kind": "qwenplan", "model": "qwen3.8-flash"},
         {"kind": "groq",   "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
         {"kind": "gemini", "model": "gemini-2.5-flash"},
         {"kind": "openai", "model": "gpt-4o-mini"},

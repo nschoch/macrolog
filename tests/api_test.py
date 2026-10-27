@@ -208,6 +208,30 @@ st, _ = req("/api/meals/999999")
 check("GET unknown meal -> 404", st == 404, str(st))
 st, _ = req(f"/api/meals/{mid_y}", "DELETE")
 
+# 17b. model resolution precedence: QWENPLAN_MODEL must beat a stale model
+# persisted in the settings DB, or editing .env would silently do nothing.
+# Import the provider module by path so this works regardless of cwd.
+import importlib.util as _ilu
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_spec = _ilu.spec_from_file_location("_vision", os.path.join(_root, "app", "vision.py"))
+_v = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_v)
+def _resolved(env_model, cfg_model):
+    if env_model is None:
+        os.environ.pop("QWENPLAN_MODEL", None)
+    else:
+        os.environ["QWENPLAN_MODEL"] = env_model
+    cfg = {"kind": "qwenplan"}
+    if cfg_model is not None:
+        cfg["model"] = cfg_model
+    return _v.OpenAICompatProvider(cfg, "qwenplan").model
+check("env beats stored model", _resolved("qwen3.8-flash", "qwen3.8-max") == "qwen3.8-flash")
+check("stored model used when env unset", _resolved(None, "qwen3.8-max") == "qwen3.8-max")
+check("default is the cheap flash tier", _resolved(None, None) == "qwen3.8-flash")
+# restore whatever the server process had (this is an in-proc import, so no
+# effect on the running server, but keep the test client tidy for later checks)
+os.environ.pop("QWENPLAN_MODEL", None)
+
 # 18. text->AI estimate (describe-a-meal)
 st, te = req("/api/estimate-text", "POST", {"text": "100g of rice and 100g of cooked 85% lean ground beef"})
 est2 = te.get("estimate", {})
