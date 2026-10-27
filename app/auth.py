@@ -97,7 +97,81 @@ def read_session_cookie(raw: str | None) -> dict | None:
     return payload
 
 
-# --------------------------------------------------------------- login flow
+# ---------------------------------------------------------------------------
+# Encrypted, stateless OIDC handshake ("state blob").
+#
+# The PKCE verifier and nonce must survive between /auth/login and the
+# provider's callback. They used to live in an in-memory dict, which broke on
+# every server restart (deploys!) and can't span multiple workers — iOS Safari
+# re-delivers callbacks later than Android does, so users hit "invalid or
+# expired state". Now the whole handshake travels inside the `state` parameter
+# itself: sealed (AES-256-GCM when `cryptography` is present, else an HMAC-
+# SHA256 envelope) with a key derived from the client secret, so it is
+# tamper-evident — the provider echoes state back verbatim — and needs no
+# shared storage. Public clients (no secret) fall back to the in-memory map.
+# ---------------------------------------------------------------------------
+_STATE_BLOB_AAD = b"macrolog-oidc-state-v1"
+
+try:                                    # prefer real encryption if available
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+except Exception:                       # LXC has it; dev boxes may not
+    _AESGCM = None
+
+
+def _state_key() -> bytes:
+    """Deterministic key derived from the confidential client secret."""
+    secret = os.environ.get("OIDC_CLIENT_SECRET", "") or "macrolog-public-client"
+    return hashlib.sha256(("macrolog-state:" + secret).encode()).digest()
+
+
+def seal_state(meta: dict) -> str | None:
+    """Encode the handshake so it survives restarts and other workers.
+
+    Returns a URL-safe, tamper-evident string that the provider echoes back in
+    `state`, or None for public-client mode (no secret) where we fall back to
+    the legacy in-memory map. Uses AES-256-GCM when `cryptography` is present,
+    otherwise an HMAC-SHA256 envelope — both keyed by the client secret, so a
+    forged state cannot validate. Integrity matters here, not confidentiality
+    (the verifier is worthless without this request's own code exchange).
+    """
+    payload = json.dumps({
+        "v": meta["verifier"], "n": meta["nonce"],
+        "r": meta.get("redirect_after", "/"), "t": int(meta["created"]),
+    }).encode()
+    if _AESGCM is not None:
+        nonce = secrets.token_bytes(12)
+        ct = _AESGCM(_state_key()).encrypt(nonce, payload, _STATE_BLOB_AAD)
+        return "G" + _b64url(nonce + ct)
+    iv = secrets.token_bytes(16)
+    mac = hmac.new(_state_key(), _STATE_BLOB_AAD + iv + payload,
+                   hashlib.sha256).digest()[:16]
+    return "H" + _b64url(iv + mac + payload)
+
+
+def open_state(state: str) -> dict | None:
+    """Inverse of seal_state; None if this isn't one of our sealed blobs."""
+    if not state or state[0] not in "GH":
+        return None
+    try:
+        raw = _b64url_decode(state[1:])
+        if state[0] == "G":
+            if _AESGCM is None:
+                return None
+            pt = _AESGCM(_state_key()).decrypt(raw[:12], raw[12:], _STATE_BLOB_AAD)
+        else:
+            iv, mac, payload = raw[:16], raw[16:32], raw[32:]
+            expect = hmac.new(_state_key(), _STATE_BLOB_AAD + iv + payload,
+                              hashlib.sha256).digest()[:16]
+            if not hmac.compare_digest(mac, expect):
+                return None                  # tampered
+            pt = payload
+        d = json.loads(pt)
+        return {"verifier": d["v"], "nonce": d["n"],
+                "redirect_after": d.get("r", "/"), "created": float(d["t"])}
+    except Exception:
+        return None
+
+
 def build_login_url(base_url: str, redirect_after: str = "/") -> tuple[str, dict]:
     """Return (authorize_url, cookie_state). Caller sets a short-lived state cookie."""
     issuer = os.environ["OIDC_ISSUER"]
@@ -123,7 +197,18 @@ def build_login_url(base_url: str, redirect_after: str = "/") -> tuple[str, dict
     url = doc["authorization_endpoint"] + sep + urllib.parse.urlencode(params)
     meta = {"verifier": code_verifier, "nonce": nonce, "state": state,
             "redirect_after": redirect_after, "created": time.time()}
-    _PENDING[state] = meta
+    public_client = not os.environ.get("OIDC_CLIENT_SECRET")
+    if public_client:
+        _PENDING[state] = meta           # nothing to key a sealed blob with
+    else:
+        # Stateless handshake: the provider echoes `state` back verbatim, so we
+        # carry the verifier+nonce inside it and store nothing — survives
+        # restarts and works across workers. Legacy map kept as fallback below.
+        sealed = seal_state(meta)
+        meta["state"] = sealed
+        url = url.replace(urllib.parse.quote_plus(state),
+                          urllib.parse.quote_plus(sealed))
+        _PENDING[sealed] = meta          # cheap belt-and-braces for old tabs
     return url, meta
 
 
@@ -149,8 +234,19 @@ def complete_login(base_url: str, query: dict, expected_state: str | None) -> di
     state = query.get("state")
     if not code or not state:
         raise AuthError("missing code/state on callback")
-    meta = _PENDING.pop(state, None)
-    if not meta or (expected_state and meta["state"] != expected_state):
+    meta = open_state(state)             # stateless: survives restarts/workers
+    legacy = False
+    if meta is None:
+        meta = _PENDING.pop(state, None)  # legacy in-memory fallback
+        legacy = True
+    if not meta:
+        raise AuthError("invalid or expired state (possible CSRF); retry login")
+    # CSRF binding: the state echoed by the provider must match the one we
+    # stashed in the browser's HttpOnly cookie at /auth/login. For sealed blobs
+    # this also proves *we* minted it (AES-GCM tag over our AAD).
+    if expected_state and expected_state != state:
+        raise AuthError("invalid or expired state (possible CSRF); retry login")
+    if legacy and meta.get("state") and meta["state"] != state:
         raise AuthError("invalid or expired state (possible CSRF); retry login")
     if time.time() - meta["created"] > 600:
         raise AuthError("login took too long; start again")
