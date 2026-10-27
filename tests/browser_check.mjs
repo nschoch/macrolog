@@ -275,48 +275,84 @@ try {
     return m ? m.id : null;
   })()`);
 
-  // ---- Describe-a-meal: text -> AI estimate -> editable review sheet ------
+  // ---- Unified Add-meal sheet: photos + text composed into one estimate ----
   await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
     if (typeof closeSheets === 'function') closeSheets(); })()`);
   await sleep(800); drain();
+
+  check('single + Add button replaces the old three', await evalJson(
+    `!!document.getElementById('btn-add-meal') && !document.getElementById('btn-describe')
+      && !document.getElementById('btn-manual') && !!document.getElementById('btn-add-meal-fab')`));
+
   const errsD = jsErrors.length;
-  await evalJson(`document.getElementById('btn-describe').click()`);
+  await evalJson(`document.getElementById('btn-add-meal').click()`);
   await sleep(400); drain();
-  check('describe sheet opens', await evalJson(`!document.getElementById('describe-sheet').hidden`));
-  await evalJson(`(() => { const t = document.getElementById('d-text');
-    t.value = '100g of rice and 100g of cooked 85% lean ground beef'; })()`);
-  await evalJson(`document.getElementById('btn-estimate-text').click()`);
-  await sleep(3500); await watchdog(); drain();
-  check('estimate produced no JS error', jsErrors.length === errsD, jsErrors.slice(errsD).join(' | ').slice(0, 300));
-  const readRev = () => evalJson(`({open: !document.getElementById('review-sheet').hidden,
+  check('add sheet opens from + button', await evalJson(`!document.getElementById('add-sheet').hidden`));
+
+  // Stage two images client-side (plate + label) without any file dialog:
+  // synthesize File objects and drive the same staging path the UI uses.
+  await evalJson(`(() => {
+    const mk = (name) => new File([new Uint8Array([255,216,255,224].concat(Array(600).fill(7)))], name, {type:'image/jpeg'});
+    stagedPhotos.length = 0;
+    stageFile(mk('plate.jpg')); stageFile(mk('label.jpg'));
+  })()`);
+  await sleep(900);
+  check('two photos staged in tray', await evalJson(`stagedPhotos.length === 2
+    && document.querySelectorAll('#photo-tray .thumb-wrap').length === 2`));
+
+  await evalJson(`document.getElementById('a-text').value = 'about half the box of pasta'`);
+  await evalJson(`document.getElementById('btn-estimate-meal').click()`);
+  await sleep(4000); await watchdog(); drain();
+  check('multi-input estimate produced no JS error', jsErrors.length === errsD,
+        jsErrors.slice(errsD).join(' | ').slice(0, 300));
+
+  const rev = await evalJson(`({open: !document.getElementById('review-sheet').hidden,
     desc: document.getElementById('r-desc').value,
     nItems: typeof compItems !== 'undefined' ? compItems.length : -1,
-    src: document.getElementById('review-sheet').dataset.source})`);
-  let rev = await readRev();
-  for (let attempt = 1; !rev.open && attempt <= 3; attempt++) {
-    // After a watchdog reload the sheets are closed and the textarea empty:
-    // redo the whole describe interaction.
-    console.log(`[harness] review not open (attempt ${attempt}) — repeating describe interaction`);
-    await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
-      document.getElementById('btn-describe').click(); })()`);
-    await sleep(400);
-    await evalJson(`document.getElementById('d-text').value = '100g of rice and 100g of cooked 85% lean ground beef'`);
-    await evalJson(`document.getElementById('btn-estimate-text').click()`);
-    await sleep(3500); await watchdog(); drain();
-    rev = await readRev();
-  }
-  check('review sheet shows text estimate with components', rev.open && rev.nItems >= 2 && rev.src === 'text', JSON.stringify(rev));
+    staged: typeof stagedForSave !== 'undefined' ? stagedForSave.length : -1})`);
+  check('review sheet opened with estimate', rev.open && rev.nItems >= 1, JSON.stringify(rev));
+  check('both temp photos carried forward for save', rev.staged === 2, `staged=${rev.staged}`);
 
-  // Save it and confirm it appears in today's list tagged text.
+  // Save and confirm BOTH photos attach to the meal.
   const errsE = jsErrors.length;
   await evalJson(`document.getElementById('btn-save-review').click()`);
-  await sleep(2500); await watchdog(); drain();
-  check('saving text meal produced no JS error', jsErrors.length === errsE, jsErrors.slice(errsE).join(' | ').slice(0, 300));
-  const saved = await evalJson(`(async () => {
+  await sleep(2800); await watchdog(); drain();
+  check('saving multi-photo meal produced no JS error', jsErrors.length === errsE,
+        jsErrors.slice(errsE).join(' | ').slice(0, 300));
+  const twoShot = await evalJson(`(async () => {
     const r = await fetch('/api/state').then(x=>x.json());
-    return r.meals.filter(m=>m.source==='text').map(m=>({id:m.id,n:(m.items||[]).length}))})()`);
-  check('text meal visible on Today with components', Array.isArray(saved) && saved.length >= 1 && saved[0].n >= 2, JSON.stringify(saved));
-  if (Array.isArray(saved)) for (const m of saved) await evalJson(`fetch('/api/meals/'+${m.id},{method:'DELETE'})`);
+    const m = r.meals.find(x => (x.photos||[]).length >= 2);
+    return m ? {id:m.id, n:m.photos.length} : null })()`);
+  check('meal stored with both photos', !!twoShot && twoShot.n === 2, JSON.stringify(twoShot));
+
+  // ---- Auto grouping: two nearby logs should form one sitting -------------
+  await evalJson(`(async () => {
+    const post = (desc, mins) => { const d = new Date(Date.now() - mins*60000);
+      const hh = String(d.getHours()).padStart(2,'0'), mm = String(d.getMinutes()).padStart(2,'0');
+      return fetch('/api/meals', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({description: desc, calories: 150, protein: 8, carbs: 12, fat: 5,
+          date: todayISO(), time: hh+':'+mm})}); };
+    await post('grp-one', 4); await post('grp-two', 2);
+  })()`);
+  await sleep(1200);
+  await evalJson(`refresh()`); await sleep(1800); await watchdog();
+  const grouped = await evalJson(`(() => ({
+    heads: [...document.querySelectorAll('.group-head h3')].map(h=>h.textContent),
+    joined: (state.groups||[]).some(g => {
+      const names = g.meal_ids.map(id => (state.meals.find(m=>m.id===id)||{}).description);
+      return names.includes('grp-one') && names.includes('grp-two'); })}))()`);
+  check('nearby meals render inside one sitting group', grouped.joined === true,
+        JSON.stringify(grouped.heads));
+  check('group headers show derived labels', grouped.heads.length >= 1, JSON.stringify(grouped.heads));
+
+  // cleanup everything this section created
+  await evalJson(`(async () => {
+    const r = await fetch('/api/state').then(x=>x.json());
+    for (const m of r.meals) {
+      if ((m.photos||[]).length >= 2 || ['grp-one','grp-two'].includes(m.description))
+        await fetch('/api/meals/'+m.id, {method:'DELETE'});
+    } })()`);
+  await sleep(1200);
   // ---- Day-nav: arrows must not raise a native date picker (Safari bug) ----
   const pickerRaised = await evalJson(`(() => {
     let raised = false;

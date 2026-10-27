@@ -48,12 +48,9 @@
 
     <div class="section-head">
       <h2>Meals</h2>
-      <span class="head-btns">
-        <button class="ghost" id="btn-describe">+ Describe</button>
-        <button class="ghost" id="btn-manual">+ Manual</button>
-      </span>
+      <button class="ghost" id="btn-add-meal">+ Add</button>
     </div>
-    <ul class="meal-list" id="meal-list"></ul>
+    <div id="meal-groups"></div>
     <p class="empty" id="meals-empty" hidden>No meals logged yet. Tap the camera to start.</p>
   </section>
 
@@ -133,14 +130,43 @@
 </main>
 
 <div class="fab-wrap">
-  <button class="fab" id="btn-photo" aria-label="Log a meal photo">
-    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.9">
-      <path d="M4 7h3l1.5-2h7L17 7h3a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1V8a1 1 0 011-1z"/>
-      <circle cx="12" cy="13" r="3.4"/>
+  <!-- Plus, not a camera: this opens the unified sheet (photo and/or label
+       and/or description), so a camera glyph would misdescribe what it does. -->
+  <button class="fab" id="btn-add-meal-fab" aria-label="Add a meal">
+    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+      <path d="M12 5v14M5 12h14"/>
     </svg>
   </button>
 </div>
-<input type="file" id="file-input" accept="image/*" capture="environment" hidden>
+<input type="file" id="file-input" accept="image/*" multiple hidden>
+<input type="file" id="file-input-cam" accept="image/*" capture="environment" hidden>
+
+<!-- ======================= UNIFIED ADD-MEAL SHEET =================== -->
+<div class="sheet-backdrop" id="add-sheet" hidden>
+  <div class="sheet">
+    <div class="sheet-grab"></div>
+    <h3>Add a meal</h3>
+    <p class="hint">Combine whatever you have — a photo of the plate, a photo of
+      the Nutrition Facts panel, and a note on how much you ate. The more inputs,
+      the better the estimate.</p>
+
+    <div class="photo-tray" id="photo-tray"></div>
+    <div class="tray-btns">
+      <button class="ghost tiny" id="btn-take-photo">Take photo</button>
+      <button class="ghost tiny" id="btn-pick-photo">Choose from library</button>
+    </div>
+
+    <label class="fld">Notes / description
+      <textarea id="a-text" rows="3" placeholder="e.g. about half the box; the duck, not the chicken"></textarea>
+    </label>
+
+    <div class="sheet-btns">
+      <button class="ghost" id="btn-cancel-add">Cancel</button>
+      <button class="ghost" id="btn-enter-values">Enter values</button>
+      <button class="primary" id="btn-estimate-meal">Estimate</button>
+    </div>
+  </div>
+</div>
 
 <!-- ======================= ESTIMATE REVIEW SHEET ===================== -->
 <div class="sheet-backdrop" id="review-sheet" hidden>
@@ -175,7 +201,7 @@
     </details>
 
     <label class="fld">Meal
-      <select id="r-kind"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
+      <select id="r-kind"><option value="auto">Auto (by time)</option><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
       <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
       <option value="other">Other</option></select>
     </label>
@@ -183,19 +209,6 @@
     <div class="sheet-btns">
       <button class="ghost" id="btn-cancel-review">Cancel</button>
       <button class="primary" id="btn-save-review">Add to log</button>
-    </div>
-  </div>
-</div>
-
-<!-- ========================= MANUAL ENTRY SHEET ====================== -->
-<div class="sheet-backdrop" id="describe-sheet" hidden>
-  <div class="sheet">
-    <div class="sheet-grab"></div>
-    <h3>Describe your meal</h3>
-    <textarea id="d-text" rows="4" placeholder="e.g. 100g of rice and 100g of cooked 85% lean ground beef"></textarea>
-    <div class="sheet-btns">
-      <button class="ghost" id="btn-cancel-describe">Cancel</button>
-      <button class="primary" id="btn-estimate-text">Estimate</button>
     </div>
   </div>
 </div>
@@ -212,7 +225,7 @@
       <label class="fld">F (g)<input id="m-fat" type="number" inputmode="numeric"></label>
     </div>
     <label class="fld">Meal
-      <select id="m-kind"><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
+      <select id="m-kind"><option value="auto">Auto (by time)</option><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
       <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
       <option value="other">Other</option></select>
     </label>

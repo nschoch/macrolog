@@ -29,7 +29,8 @@ from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           calibration_multipliers, macronutrient_targets,
                           record_correction, tdee_from_formula, weight_trend)
 from app.database import Database
-from app.vision import ProviderError, estimate_photo, estimate_text
+from app.vision import (ProviderError, estimate_meal, estimate_photo,
+                           estimate_text)
 from app import auth as OIDC
 
 SESSION_COOKIE = "macrolog_session"
@@ -55,6 +56,7 @@ DEFAULT_SETTINGS = {
     "starting_weight_kg": None,
     "auto_adapt": True,
     "calibrate_estimates": True,
+    "meal_gap_minutes": 45,          # meals logged within this gap = one sitting
     # Provider chain, tried in order. First entry wins; missing keys are skipped.
     "providers": [
         {"kind": "qwenplan", "model": "qwen3.8-flash"},
@@ -94,7 +96,8 @@ def load_env():
 USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
                      "calorie_target", "start_date", "starting_weight_kg",
-                     "auto_adapt", "calibrate_estimates", "_profile_set"}
+                     "auto_adapt", "calibrate_estimates", "_profile_set",
+                     "meal_gap_minutes"}
 
 
 def get_settings(owner: str = "default") -> dict:
@@ -166,8 +169,11 @@ class Api:
         providers = [{"kind": p["kind"], "model": p.get("model"),
                      "configured": (p["kind"] == "stub") or (_provider_ready(p) and not p.get("unreachable"))}
                     for p in s.get("providers", [])]
+        dicts = [_meal_dict(m, item_map.get(m["id"], [])) for m in meals]
         return 200, {
-            "date": t, "meals": [_meal_dict(m, item_map.get(m["id"], [])) for m in meals],
+            "date": t, "meals": dicts,
+            # Derived eatings (see group_meals); gap is user-tunable.
+            "groups": group_meals(dicts, int(s.get("meal_gap_minutes") or 45)),
             "consumed": consumed, "targets": targets, "trend": trend,
             "settings": _public_settings(s), "providers": providers,
             "active_provider": ready[0] if ready else "stub",
@@ -226,6 +232,53 @@ class Api:
         return 200, out
 
     @staticmethod
+    def POST_estimate_meal(h, q, body):
+        """Merged capture: any number of photos (food and/or Nutrition Facts
+        label) plus optional free text, estimated as ONE meal. Preview only —
+        nothing is written until the client posts /meals.
+
+        Supersedes choosing between photo-only and text-only at capture time,
+        which is what lets a user photograph a label *and* say "I ate half".
+        """
+        owner = getattr(h, "owner", "default")
+        images = [path for path, _mime in (getattr(h, "_uploads", None) or [])]
+        if not images:                       # legacy single-photo field
+            one = getattr(h, "_upload", None)
+            if one:
+                images = [one[0]]
+        text = str((body or {}).get("text") or "").strip()[:2000]
+        if not images and len(text) < 3:
+            return 400, {"error": "add a photo or describe what you ate"}
+        try:
+            meal, provider, model = estimate_meal(images, text or None,
+                                                  get_settings(owner))
+        except ProviderError as e:
+            for path in images:
+                _unlink(path)
+            return 502, {"error": f"all providers failed: {e}"}
+        except Exception as e:  # noqa: BLE001
+            for path in images:
+                _unlink(path)
+            return 500, {"error": f"{type(e).__name__}: {e}"}
+        if not meal["items"] and not meal["calories"]:
+            for path in images:
+                _unlink(path)
+            return 422, {"error": meal.get("notes") or "no food recognized"}
+        cur = get_settings(owner)
+        changed = False
+        if cur.get("calibrate_estimates"):
+            meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
+        out = {"estimate": meal, "provider": provider, "model": model,
+               "calibrated": changed,
+               # Client keeps these and hands them back on save so every photo
+               # ends up attached to the meal rather than orphaned in tmp.
+               "temp_photos": images}
+        errs = meal.get("_provider_errors")
+        if errs:
+            out["warning"] = _provider_warning(errs)
+        return 200, out
+
+    @staticmethod
     def POST_estimate_text(h, q, body):
         """Text -> AI estimate for described meals. Preview only; nothing is
         written until the client posts /meals with the returned estimate."""
@@ -260,8 +313,10 @@ class Api:
         s = get_settings(owner)
         photo = body.get("photo_path")
         source = body.get("source", "photo")
-        if photo and not os.path.abspath(photo).startswith(os.path.abspath(PHOTO_DIR)):
-            return 400, {"error": "invalid photo path"}
+        for cand in [photo, *(body.get("photos") or [])]:
+            if cand and not os.path.abspath(str(cand)).startswith(
+                    os.path.abspath(PHOTO_DIR)):
+                return 400, {"error": "invalid photo path"}
         d = body.get("date") or today_str()
         ts = _parse_when(body, default_date=d)
         items = _sanitize_items(body.get("items"))
@@ -280,10 +335,20 @@ class Api:
             if photo and os.path.exists(photo):
                 os.remove(photo)
             return 400, {"error": "calories must be > 0"}
-        final_path = _promote_photo(photo) if photo else None
+        # Accept several photos (e.g. the plate AND its Nutrition Facts label):
+        # `photos` is a list, `photo_path` a single temp file for older clients.
+        tmp_list = [str(x) for x in (body.get("photos") or []) if x]
+        if not tmp_list and photo:
+            tmp_list = [photo]
+        tmp_list = [x for x in tmp_list
+                    if os.path.abspath(x).startswith(os.path.abspath(PHOTO_DIR))]
+        final_path = _store_photos([_promote_photo(x) for x in tmp_list])
         mid = db.add_meal(
             date=d, ts=ts,
-            kind=str(body.get("kind") or "other")[:20],
+            # "auto" = user declined to name it; grouping decides from time, so
+            # persist a neutral value that won't override the derived label.
+            kind=("other" if str(body.get("kind") or "other") == "auto"
+                  else str(body.get("kind") or "other"))[:20],
             description=meal["description"], calories=meal["calories"],
             protein=meal["protein"], carbs=meal["carbs"], fat=meal["fat"],
             confidence=float(body.get("confidence") or 0.5),
@@ -587,7 +652,8 @@ def _meal_dict(m, items=None) -> dict:
          "protein": m["protein"], "carbs": m["carbs"], "fat": m["fat"],
          "confidence": m["confidence"], "source": m["source"],
          "provider": m["provider"], "model": m["model"],
-         "photo": os.path.basename(m["photo_path"]) if m["photo_path"] else None}
+         "photo": _photo_list(m["photo_path"])[0] if m["photo_path"] else None,
+        "photos": _photo_list(m["photo_path"])}
     if items is not None:
         d["items"] = items
     return d
@@ -673,6 +739,90 @@ def _day_summary(d: str, owner: str = "default") -> dict:
         for k in ("calories", "protein", "carbs", "fat")},
         "meals": [_meal_dict(m, item_map.get(m["id"], [])) for m in meals],
         "exercise": _exercise_total(d, owner)}
+
+
+# Clock windows used to NAME an auto-detected sitting. A meal's start time picks
+# the label; consecutive meals that land in the same window get numbered, so a
+# late snack after dinner reads "Dinner 2" rather than silently reusing Dinner.
+MEAL_WINDOWS = (("breakfast", 0, 10.5), ("lunch", 10.5, 15.0),
+                ("dinner", 15.0, 21.0), ("snack", 21.0, 24.0))
+
+
+def group_meals(meals: list[dict], gap_minutes: int = 45) -> list[dict]:
+    """Cluster a day's meals into eatings by time proximity.
+
+    Deliberately derived, not stored: the user logs one dish at a time (a photo
+    per course, or a plate now and its label later), so requiring them to pick
+    "Lunch" each time is friction that also produces wrong groupings. Two
+    records within `gap_minutes` of each other are treated as one sitting —
+    generous enough that a restaurant meal spanning courses still groups, while
+    a mid-afternoon snack stays separate.
+
+    Returns [{"id", "start_ts", "meal_ids", "label", "calories", ...}] ordered
+    through the day. `kind` from any record only overrides when the user set it
+    explicitly (auto|None means "we decide").
+    """
+    if not meals:
+        return []
+    ordered = sorted(meals, key=lambda m: (m.get("ts") or 0, m.get("id") or 0))
+    clusters: list[list[dict]] = [[ordered[0]]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        gap = (cur.get("ts", 0) - prev.get("ts", 0)) / 60.0
+        if gap <= gap_minutes:
+            clusters[-1].append(cur)
+        else:
+            clusters.append([cur])
+
+    out = []
+    seen_labels: dict[str, int] = {}
+    for idx, cluster in enumerate(clusters, start=1):
+        start_ts = min((m.get("ts") or 0) for m in cluster)
+        hour = datetime.fromtimestamp(start_ts).hour + \
+            datetime.fromtimestamp(start_ts).minute / 60.0
+        name = next((lbl for lbl, lo, hi in MEAL_WINDOWS if lo <= hour < hi),
+                    "snack")
+        explicit = {m.get("kind") for m in cluster
+                    if m.get("kind") and m["kind"] not in ("auto", "other")}
+        if len(explicit) == 1:              # user already named this sitting
+            name = explicit.pop()
+        seen_labels[name] = seen_labels.get(name, 0) + 1
+        label = name if seen_labels[name] == 1 else f"{name} {seen_labels[name]}"
+        out.append({
+            "id": idx,
+            "label": label.capitalize(),
+            "start_ts": start_ts,
+            "meal_ids": [m["id"] for m in cluster],
+            "count": len(cluster),
+            "calories": round(sum(float(m.get("calories") or 0) for m in cluster)),
+            "protein": round(sum(float(m.get("protein") or 0) for m in cluster)),
+            "carbs": round(sum(float(m.get("carbs") or 0) for m in cluster)),
+            "fat": round(sum(float(m.get("fat") or 0) for m in cluster)),
+        })
+    return out
+
+
+def _photo_list(stored) -> list[str]:
+    """Meals store one path or a JSON list of them (plate + label photo);
+    always return basenames in order."""
+    if not stored:
+        return []
+    if isinstance(stored, str) and stored.lstrip().startswith("["):
+        try:
+            items = json.loads(stored)
+        except ValueError:
+            items = [stored]
+    else:
+        items = [stored]
+    return [os.path.basename(p) for p in items if p]
+
+
+def _store_photos(paths: list[str]) -> str | None:
+    """Persist promoted photo paths: plain string when one (back-compat with
+    rows written before multi-photo support), JSON array when several."""
+    kept = [p for p in paths if p]
+    if not kept:
+        return None
+    return kept[0] if len(kept) == 1 else json.dumps(kept)
 
 
 def _promote_photo(tmp_path: str) -> str | None:
@@ -789,6 +939,7 @@ class Handler(BaseHTTPRequestHandler):
             self._upload = upload          # consumed by POST_estimate
             return fields, None
         self._upload = None
+        self._uploads = []
         if not raw:
             return {}, None
         try:
@@ -799,9 +950,11 @@ class Handler(BaseHTTPRequestHandler):
     def _parse_multipart(self, raw: bytes, ctype: str):
         """Minimal multipart/form-data reader.
 
-        Returns (text_fields, (photo_path, mime) | None). The photo is written
-        to a temp file in PHOTO_DIR; it is promoted on save or deleted if the
-        estimate fails / the user cancels.
+        Returns (text_fields, (photo_path, mime) | None) where the tuple is the
+        FIRST image, for the single-photo callers; every image additionally
+        lands on self._uploads in send order so multi-image endpoints can see
+        them all. Photos are written to temp files in PHOTO_DIR and promoted on
+        save or deleted if the estimate fails / the user cancels.
         """
         boundary = None
         for part in ctype.split(";"):
@@ -812,6 +965,7 @@ class Handler(BaseHTTPRequestHandler):
             return {}, None
         fields = {}
         upload = None
+        uploads: list[tuple[str, str]] = []   # every image part, in send order
         for chunk in raw.split(b"--" + boundary.encode()):
             chunk = chunk.strip(b"\r\n")
             if not chunk or chunk == b"--":
@@ -841,8 +995,12 @@ class Handler(BaseHTTPRequestHandler):
                 tmp = os.path.join(PHOTO_DIR, f"tmp-{uuid.uuid4().hex}{ext}")
                 with open(tmp, "wb") as fh:
                     fh.write(body)
-                upload = (tmp, guess_mime(ext))
-                fields["photo_path"] = tmp
+                pair = (tmp, guess_mime(ext))
+                uploads.append(pair)
+                if upload is None:
+                    upload = pair          # legacy single-photo callers
+                fields.setdefault("photo_path", tmp)
+        self._uploads = uploads
         return fields, upload
 
     # -- routing ---------------------------------------------------------
@@ -957,6 +1115,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.POST_estimate(self, q, body)
             elif resource == "estimate-text" and verb == "POST":
                 st, pl = Api.POST_estimate_text(self, q, body)
+            elif resource == "estimate-meal" and verb == "POST":
+                st, pl = Api.POST_estimate_meal(self, q, body)
             elif resource == "meals" and verb == "POST":
                 st, pl = Api.POST_meals(self, q, body)
             elif resource == "meals" and tail and verb == "GET":

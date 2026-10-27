@@ -6,6 +6,7 @@ caller's environment; deletes nothing you care about.
 """
 import json
 import os
+import time
 import sys
 import urllib.error
 import urllib.request
@@ -260,6 +261,99 @@ if est2.get("calories"):
         check("text meal carries source + components", one.get("source") == "text"
               and len(one.get("items", [])) >= 2, f"{one.get('source')} items={len(one.get('items', []))}")
         req(f"/api/meals/{mid_t}", "DELETE")
+
+# 19. merged estimate-meal: photos + text in one request
+import datetime as _dt3
+jpg = (bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffdb004300")
+       + b"\x00" * 1500 + b"ffd9")
+# multipart with two images and a text field
+def multi(path, parts):
+    boundary = "----mltest"
+    body = b""
+    for name, filename, data in parts:
+        body += f"--{boundary}\r\n".encode()
+        disp = f'Content-Disposition: form-data; name="{name}"'
+        if filename:
+            disp += f'; filename="{filename}"'
+        body += (disp + "\r\n" if not filename else disp + "\r\n").encode()
+        if filename:
+            body += b"Content-Type: image/jpeg\r\n"
+        body += b"\r\n" + (data if isinstance(data, bytes) else data.encode()) + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    return req(path, "POST", raw_body=body,
+               headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+
+st, r2 = multi("/api/estimate-meal", [("photos", "plate.jpg", jpg),
+                                      ("photos", "label.jpg", jpg),
+                                      ("text", None, "about half the box")])
+check("estimate-meal 2 photos + text -> 200", st == 200, str(r2)[:120])
+temps = r2.get("temp_photos") or []
+check("estimate-meal returns temp_photos list", len(temps) == 2, str(temps))
+est_items = (r2.get("estimate") or {}).get("items", [])
+check("estimate-meal produced items", len(est_items) >= 1, str(est_items)[:120])
+st, r3 = multi("/api/estimate-meal", [("text", None, "just text no photo")])
+check("estimate-meal text-only accepted", st == 200, str(st))
+st, r4 = multi("/api/estimate-meal", [("text", None, "ab")])
+check("estimate-meal empty-ish -> 400", st == 400, str(st))
+
+# 20. save a meal carrying BOTH photos and confirm they round-trip
+if temps:
+    st, saved = req("/api/meals", "POST", {"description": "two-photo meal",
+        "calories": 400, "protein": 30, "carbs": 20, "fat": 18,
+        "photos": temps, "source": "photo"})
+    mp = (saved or {}).get("id")
+    check("save meal with 2 photos", st in (200, 201) and mp, str(st))
+    if mp:
+        st, one = req(f"/api/meals/{mp}")
+        ph = one.get("photos") or []
+        check("meal reports both photos", len(ph) == 2, str(ph))
+        check("legacy single 'photo' still populated", bool(one.get("photo")))
+        try:  # binary endpoint: cannot go through req()'s JSON decode
+            with urllib.request.urlopen(BASE + f"/api/photo/{ph[0]}", timeout=15) as pr:
+                img_ok = pr.status == 200 and pr.read(2) == b"\xff\xd8"
+        except Exception:
+            img_ok = False
+        check("first photo served as image bytes", img_ok)
+        req(f"/api/meals/{mp}", "DELETE")
+
+# 21. auto meal grouping
+def mk(desc, mins_ago, kcal=100):
+    """Log a meal at a specific offset from now so cluster gaps are exact."""
+    import datetime as _d4
+    t = _d4.datetime.now() - _d4.timedelta(minutes=mins_ago)
+    return req("/api/meals", "POST", {"description": desc, "calories": kcal,
+        "protein": 5, "carbs": 5, "fat": 5,
+        "date": _d4.date.today().isoformat(),
+        "time": t.strftime("%H:%M")})
+
+_, rA = mk("gA", 5); _, rB = mk("gB", 2)     # 3 min apart -> one sitting
+_, rC = mk("gC", 200)                        # hours later -> its own sitting
+idsAB = None
+st, gs = req("/api/state")
+byDesc = {m["description"]: m["id"] for m in gs["meals"]}
+wantAB = {byDesc.get("gA"), byDesc.get("gB")}
+groups = gs.get("groups") or []
+names = [g["label"] for g in groups]
+check("state includes derived groups", len(groups) >= 2, str(names))
+# Assert on OUR two meals specifically — other checks leave meals logged near
+# "now", so counting group size would be flaky; membership is what matters.
+pair = next((g for g in groups if wantAB <= set(g["meal_ids"])), None)
+check("close-in-time meals clustered together", pair is not None, str(names))
+if pair:
+    both = wantAB <= set(pair["meal_ids"])
+    check("cluster contains both nearby meals", both, str(sorted(wantAB)))
+    mine = [m for m in gs["meals"] if m["id"] in wantAB]
+    check("cluster calories cover its members",
+          pair["calories"] >= sum(int(m["calories"]) for m in mine) - 1,
+          f'{pair["calories"]} vs {sum(int(m["calories"]) for m in mine)}')
+gC_id = byDesc.get("gC")
+solo = [g for g in groups if gC_id in g["meal_ids"]]
+check("far-apart meal is its own group", len(solo) == 1,
+      str([(g["label"], g["count"]) for g in groups]))
+check("group labels are time-derived strings", all(isinstance(g["label"], str) and g["label"] for g in groups))
+for m in gs["meals"]:
+    if m["description"].startswith("g"):
+        req(f"/api/meals/{m['id']}", "DELETE")
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

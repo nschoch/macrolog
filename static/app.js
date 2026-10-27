@@ -7,7 +7,7 @@ let state = null;
 let pendingPhoto = null;   // { temp_photo, dataUrl }
 // Which day the Today view is showing. '' = today (server default).
 // All writes (meals, weights) stamp this date while browsing a past day.
-let viewDate = '';                        
+let viewDate = '';   // '' = today, else YYYY-MM-DD being browsed
 
 // --------------------------------------------------------------- units layer
 // Canonical storage is metric (kg / cm). Imperial is a pure display + input
@@ -213,7 +213,7 @@ function renderToday(s) {
     </div>`).join('');
 
   renderStatus(s);
-  renderMeals(s.meals);
+  renderGroups(s.groups, s.meals);
 }
 
 function renderStatus(s) {
@@ -240,24 +240,24 @@ function confColor(c) {
   return c >= 0.75 ? 'var(--accent)' : c >= 0.5 ? 'var(--carbs)' : 'var(--danger)';
 }
 
-function renderMeals(meals) {
-  $('meals-empty').hidden = meals.length > 0;
-  $('meal-list').innerHTML = meals.map(m => {
+function mealRowHtml(m) {
     const time = new Date(m.ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    const thumb = m.photo
-      ? `<img class="meal-thumb" src="/api/photo/${encodeURIComponent(m.photo)}" alt="" loading="lazy">`
+    // A meal may carry several photos (plate + nutrition label); show them all.
+    const pics = (m.photos && m.photos.length ? m.photos : (m.photo ? [m.photo] : []));
+    const thumb = pics.length
+      ? pics.slice(0, 2).map(p => `<img class="meal-thumb" src="/api/photo/${encodeURIComponent(p)}" alt="" loading="lazy">`).join('')
       : `<div class="meal-thumb"></div>`;
     const comps = (m.items || []);
     const compHtml = comps.length ? `
       <ul class="comp-list">${comps.map(c =>
         `<li><span class="c-name">${esc(c.name || 'item')}</span><span class="c-g">${fmt(c.grams)}g</span><span class="c-k">${fmt(c.calories)}</span></li>`
       ).join('')}</ul>` : '';
-    return `<li class="meal ${comps.length ? 'has-comps' : ''}" data-id="${m.id}">
+  return `<li class="meal ${comps.length ? 'has-comps' : ''}" data-id="${m.id}">
       <div class="meal-row" data-toggle="${m.id}">
         ${thumb}
         <div class="meal-info">
           <div class="meal-desc">${esc(m.description || m.kind || 'Meal')}</div>
-          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time} · ${cap(m.kind)}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} items` : ''}</div>
+          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.kind && m.kind !== 'other' ? ' · ' + cap(m.kind) : ''}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} items` : ''}</div>
         </div>
         <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
         <div class="meal-actions">
@@ -271,6 +271,29 @@ function renderMeals(meals) {
       </div>
       ${compHtml}
     </li>`;
+}
+
+// Grouped day view: server clusters records into eatings by time proximity, so
+// logging a second dish does not create a competing "meal" and the label comes
+// from when you ate rather than a dropdown you have to answer every time.
+function renderGroups(groups, meals) {
+  const host = $('meal-groups');
+  const byId = Object.fromEntries((meals || []).map(m => [m.id, m]));
+  $('meals-empty').hidden = (meals || []).length > 0;
+  if (!groups || !groups.length) { host.innerHTML = ''; return; }
+  host.innerHTML = groups.map(g => {
+    const rows = g.meal_ids.map(id => byId[id]).filter(Boolean).map(mealRowHtml).join('');
+    const t = new Date(g.start_ts * 1000)
+      .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const extra = g.count > 1 ? ` · ${g.count} items` : '';
+    return `<section class="meal-group">
+      <header class="group-head">
+        <h3>${esc(g.label)}</h3>
+        <span class="group-meta">${t}${extra}</span>
+        <span class="group-kcal">${fmt(g.calories)}<small>kcal</small></span>
+      </header>
+      <ul class="meal-list">${rows}</ul>
+    </section>`;
   }).join('');
 }
 
@@ -279,7 +302,7 @@ const esc = (s) => String(s || '').replace(/[&<>"]/g, ch =>
 const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : '';
 
 // ------------------------------------------------------------- meal actions
-$('meal-list').addEventListener('click', async (e) => {
+$('meal-groups').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const li = btn.closest('.meal');
@@ -311,7 +334,7 @@ $('meal-list').addEventListener('click', async (e) => {
 
 // Tap a meal row (not its action buttons): on today, expand/collapse the
 // breakdown; on a past day, open it for editing — that's how you fix an old log.
-$('meal-list').addEventListener('click', async (e) => {
+$('meal-groups').addEventListener('click', async (e) => {
   if (e.target.closest('[data-act]')) return;
   const head = e.target.closest('.meal-row'); if (!head) return;
   if (!viewDate) { head.parentElement.classList.toggle('open'); return; }
@@ -321,39 +344,6 @@ $('meal-list').addEventListener('click', async (e) => {
       editingId: m.id, photoUrl: m.photo ? `/api/photo/${encodeURIComponent(m.photo)}` : null });
   } catch (err) { toast(err.message, true); }
 });
-
-// ------------------------------------------------------------------- capture
-$('btn-photo').addEventListener('click', () => $('file-input').click());
-$('file-input').addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  if (file.size > 12 * 1024 * 1024) { toast('Image too large (max 12MB)', true); return; }
-
-  const dataUrl = await readAsDataURL(file);
-  loading(true, 'Analyzing photo…');
-  try {
-    const form = new FormData();
-    form.append('photo', file, file.name || 'meal.jpg');
-    const res = await fetchWithTimeout('/api/estimate', { method: 'POST', body: form }, 60000);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Estimate failed');
-    pendingPhoto = data.temp_photo;
-    openReview({ ...data, previewUrl: dataUrl });
-  } catch (err) {
-    toast(err.message, true);
-  } finally {
-    loading(false);
-    e.target.value = '';
-  }
-});
-
-function readAsDataURL(file) {
-  return new Promise((resolve) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.readAsDataURL(file);
-  });
-}
 
 // ------------------------------------------------------------ review sheet
 let compItems = [];        // live editable components for the open meal
@@ -484,7 +474,7 @@ function closeSheets() {
   $('review-sheet').dataset.editing = '';
   $('review-sheet').dataset.source = '';
   $('manual-sheet').hidden = true;
-  $('describe-sheet').hidden = true;
+  $('add-sheet').hidden = true;
   document.body.style.overflow = '';
 }
 
@@ -525,8 +515,12 @@ $('btn-save-review').addEventListener('click', async () => {
     } else {
       await api('meals', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...payload, photo_path: pendingPhoto }),
+        body: JSON.stringify(Object.assign({}, payload,
+          stagedForSave.length ? { photos: stagedForSave }
+                               : { photo_path: pendingPhoto })),
       });
+      stagedForSave = [];
+      clearStaged();
       pendingPhoto = null;
       toast('Logged');
     }
@@ -536,11 +530,7 @@ $('btn-save-review').addEventListener('click', async () => {
 });
 
 // -------------------------------------------------------------- manual entry
-$('btn-manual').addEventListener('click', () => {
-  ['m-desc', 'm-cal', 'm-pro', 'm-car', 'm-fat'].forEach(id => { $(id).value = ''; });
-  $('manual-sheet').hidden = false;
-  document.body.style.overflow = 'hidden';
-});
+// (Manual entry is opened from the Add-meal sheet's 'Enter values'.)
 $('btn-cancel-manual').addEventListener('click', closeSheets);
 $('manual-sheet').addEventListener('click', (e) => { if (e.target.id === 'manual-sheet') closeSheets(); });
 
@@ -567,35 +557,109 @@ $('btn-save-manual').addEventListener('click', async () => {
   } catch (err) { toast(err.message, true); }
 });
 
-// ------------------------------------------------------------- describe meal
-// Text -> AI estimate. The result feeds the SAME review sheet as photos, so
-// per-item grams/macros are editable before saving and land on viewDate.
-$('btn-describe').addEventListener('click', () => {
-  $('describe-sheet').hidden = false;
-  document.body.style.overflow = 'hidden';
-  // No .focus(): iOS ignores it for <textarea> and Safari's autofill overlay
-  // covers Cancel/Estimate while the field is focused with an empty value.
-  // The placeholder makes the empty state obvious instead.
-});
-$('btn-cancel-describe').addEventListener('click', closeSheets);
-$('describe-sheet').addEventListener('click', (e) => { if (e.target.id === 'describe-sheet') closeSheets(); });
+// ------------------------------------------------------- unified add-meal
+// One entry point that composes inputs: N photos (plate and/or Nutrition Facts
+// label) + optional free text. Sending them together lets the model use the
+// label's measured values and the note's stated portion instead of guessing.
+let stagedPhotos = [];   // {blob, url} before upload
+let stagedForSave = [];  // server temp paths returned by estimate-meal
 
-$('btn-estimate-text').addEventListener('click', async () => {
-  const text = $('d-text').value.trim();
-  if (!text) { toast('Describe your meal first', true); return; }
-  loading(true, 'Estimating from description…');
+function renderTray() {
+  const tray = $('photo-tray');
+  if (!tray) return;
+  tray.innerHTML = stagedPhotos.map((ph, i) => `
+    <div class="thumb-wrap">
+      <img src="${ph.url}" alt="photo ${i + 1}">
+      <button class="thumb-x" data-drop="${i}" aria-label="Remove photo">&times;</button>
+    </div>`).join('') +
+    (stagedPhotos.length ? '' :
+      '<p class="hint tray-empty">No photos yet — the food itself or its nutrition label both work.</p>');
+}
+
+function clearStaged() {
+  for (const ph of stagedPhotos) {
+    if (ph.url.startsWith('blob:') && URL.revokeObjectURL) URL.revokeObjectURL(ph.url);
+  }
+  stagedPhotos = [];
+}
+
+function openAddSheet() {
+  $('add-sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+  renderTray();
+}
+
+$('btn-add-meal').addEventListener('click', openAddSheet);
+$('btn-add-meal-fab').addEventListener('click', openAddSheet);
+$('btn-cancel-add').addEventListener('click', () => { clearStaged(); closeSheets(); });
+$('add-sheet').addEventListener('click', (e) => {
+  if (e.target.id === 'add-sheet') { clearStaged(); closeSheets(); }
+});
+
+function stageFile(file) {
+  if (!file) return;
+  if (file.size > 12 * 1024 * 1024) { toast('Image too large (max 12MB)', true); return; }
+  if (stagedPhotos.length >= 4) { toast('Up to 4 photos per meal', true); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    stagedPhotos.push({ blob: file, url: reader.result });
+    renderTray();
+  };
+  reader.readAsDataURL(file);
+}
+
+$('btn-take-photo').addEventListener('click', () => $('file-input-cam').click());
+$('btn-pick-photo').addEventListener('click', () => $('file-input').click());
+$('file-input').addEventListener('change', (e) => {
+  [...(e.target.files || [])].forEach(stageFile);
+  e.target.value = '';
+});
+$('file-input-cam').addEventListener('change', (e) => {
+  stageFile(e.target.files && e.target.files[0]);
+  e.target.value = '';
+});
+$('photo-tray').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-drop]'); if (!b) return;
+  const [ph] = stagedPhotos.splice(+b.dataset.drop, 1);
+  if (ph && ph.url.startsWith('blob:')) URL.revokeObjectURL(ph.url);
+  renderTray();
+});
+
+$('btn-estimate-meal').addEventListener('click', async () => {
+  const text = $('a-text').value.trim();
+  if (!stagedPhotos.length && !text) {
+    toast('Add a photo or describe what you ate', true); return;
+  }
+  loading(true, 'Estimating\u2026');
   try {
-    const data = await api('estimate-text', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-    $('describe-sheet').hidden = true;
-    openReview({ ...data });   // warning (if any) shows as a banner in the sheet
+    const form = new FormData();
+    for (const ph of stagedPhotos) {
+      form.append('photos', ph.blob, (ph.blob && ph.blob.name) || 'meal.jpg');
+    }
+    if (text) form.append('text', text);
+    const res = await fetchWithTimeout('/api/estimate-meal',
+                                       { method: 'POST', body: form }, 90000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Estimate failed');
+    $('add-sheet').hidden = true;
+    stagedForSave = data.temp_photos || [];
+    openReview(Object.assign({}, data, {
+      previewUrl: stagedPhotos.length ? stagedPhotos[0].url : null,
+    }));
   } catch (err) {
     toast(err.message, true);
   } finally {
     loading(false);
   }
+});
+
+// Exact macros read off a label by the user \u2014 skips the model entirely,
+// which is the most accurate path available.
+$('btn-enter-values').addEventListener('click', () => {
+  $('add-sheet').hidden = true;
+  ['m-desc', 'm-cal', 'm-pro', 'm-car', 'm-fat'].forEach(id => { $(id).value = ''; });
+  $('manual-sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
 });
 
 // -------------------------------------------------------------------- weight

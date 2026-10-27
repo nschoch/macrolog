@@ -57,6 +57,36 @@ rice bowl with avocado".
 describe what you see in notes.
 """
 
+MEAL_PROMPT = """You are a dietitian estimating nutrition from one or more inputs about a single meal: photos of the food, photos of a packaged product's Nutrition Facts panel, and/or a written description. Use every input you are given; they complement each other.
+
+For each photo of FOOD: identify every distinct item and estimate its COOKED edible weight in grams using visual anchors (plate diameter ~26cm, fork tines ~4mm, standard glass 240ml). Be conservative: restaurant portions are larger than home portions, and dressing/oil/sugar add hidden calories.
+
+For each photo of a NUTRITION FACTS LABEL: transcribe the serving size and the per-serving values (calories, protein, carbs incl. fiber, fat, sodium if shown), plus the product name and total servings per package if visible. These are MEASURED numbers and outrank your visual guess for that item. If the description or another photo says how much was eaten ("about half the box", "1.5 servings", "90g"), scale the per-serving figures to that amount; report the resulting absolute amounts for what was actually consumed.
+
+If a written description is provided, treat it as ground truth for intent: it names ambiguous foods ("the duck"), fixes quantities, and resolves what the photos cannot. When description and photo disagree on identity, prefer the description; on portion size, prefer an explicit stated amount over a visual estimate.
+
+Return ONLY a JSON object, no markdown fences, exactly this shape:
+{
+  "items": [
+    {"name": str, "grams": number, "calories": number,
+     "protein": number, "carbs": number, "fat": number}
+  ],
+  "total_calories": number, "total_protein": number,
+  "total_carbs": number, "total_fat": number,
+  "confidence": number,
+  "description": str,
+  "notes": str
+}
+
+Rules:
+- All numbers are per-item ABSOLUTE amounts for the WHOLE portion actually eaten, never per 100g and never per serving.
+- total_* must equal the sum of the item values.
+- confidence is 0.0-1.0. Use HIGH confidence when a Nutrition Facts label or an explicit stated amount pins the numbers; use LOW confidence when the plate is crowded, food is mixed/unidentifiable, or portion depth is ambiguous.
+- notes: state anything you had to assume, and flag any label values used.
+- description: one short human phrase for the whole meal.
+- If there is nothing recognizable, return items: [] with confidence 0 and explain in notes.
+"""
+
 TEXT_PROMPT = """You are a dietitian estimating nutrition from a text \
 description of a meal or its ingredients.
 
@@ -248,6 +278,28 @@ class GeminiProvider:
         return _extract_json(text)
 
 
+    def estimate_meal(self, images: list[str], text: str | None = None) -> dict:
+        """One or more food/label photos plus an optional description."""
+        if not self.key:
+            raise ProviderError("Gemini API key not set")
+        parts: list[dict] = [{"text": MEAL_PROMPT}]
+        for path in images:
+            b64, mime = encode_image(path)
+            parts.append({"inline_data": {"mime_type": mime, "data": b64}})
+        if text:
+            parts.append({"text": "Written description of what I ate:\n" + text})
+        payload = {"contents": [{"parts": parts}],
+                   "generationConfig": {"temperature": 0.1,
+                                        "responseMimeType": "application/json"}}
+        data = _post(f"{self.base}/v1beta/models/{self.model}:generateContent",
+                     payload, {"x-goog-api-key": self.key},
+                     timeout=45 if not images else 90)
+        try:
+            got = data["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError):
+            raise ProviderError(f"unexpected reply: {json.dumps(data)[:250]}") from None
+        return _extract_json("".join(p.get("text", "") for p in got))
+
     def estimate_text(self, text: str) -> dict:
         if not self.key:
             raise ProviderError("Gemini API key not set")
@@ -331,6 +383,31 @@ class OpenAICompatProvider:
             raise ProviderError(f"unexpected reply: {json.dumps(data)[:250]}") from None
         return _extract_json(text)
 
+    def estimate_meal(self, images: list[str], text: str | None = None) -> dict:
+        """One or more food/label photos plus an optional description."""
+        if not self.key:
+            raise ProviderError(f"{self.name} API key not set")
+        content: list[dict] = [{"type": "text", "text": MEAL_PROMPT}]
+        for path in images:
+            b64, mime = encode_image(path)
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        if text:
+            content.append({"type": "text",
+                            "text": "Written description of what I ate:\n" + text})
+        payload = {"model": self.model, "temperature": 0.1, "max_tokens": 1500,
+                   "messages": [{"role": "user", "content": content}]}
+        if self.name not in ("groq", "qwenplan"):
+            payload["response_format"] = {"type": "json_object"}
+        data = _post(f"{self.base}/chat/completions", payload,
+                     {"Authorization": f"Bearer {self.key}"},
+                     timeout=45 if not images else 90)
+        try:
+            out = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            raise ProviderError(f"unexpected reply: {json.dumps(data)[:250]}") from None
+        return _extract_json(out)
+
     def estimate_text(self, text: str) -> dict:
         if not self.key:
             raise ProviderError(f"{self.name} API key not set")
@@ -374,6 +451,23 @@ class OllamaProvider:
             raise ProviderError(f"empty reply: {json.dumps(data)[:200]}")
         return _extract_json(text)
 
+    def estimate_meal(self, images: list[str], text: str | None = None) -> dict:
+        imgs = [encode_image(p)[0] for p in images]
+        body = MEAL_PROMPT
+        if text:
+            body += "\n\nWritten description of what I ate:\n" + text
+        msg = {"role": "user", "content": body}
+        if imgs:
+            msg["images"] = imgs
+        payload = {"model": self.model, "raw": True, "stream": False,
+                   "format": "json", "options": {"temperature": 0.1},
+                   "messages": [msg]}
+        data = _post(f"{self.base}/api/chat", payload, {}, timeout=300)
+        out = (data.get("message") or {}).get("content", "")
+        if not out:
+            raise ProviderError(f"empty reply: {json.dumps(data)[:200]}")
+        return _extract_json(out)
+
     def estimate_text(self, text: str) -> dict:
         payload = {"model": self.model, "raw": True, "stream": False,
                    "format": "json", "options": {"temperature": 0.1},
@@ -403,6 +497,28 @@ class StubProvider:
                        "carbs": kcal * 0.45 / 4, "fat": kcal * 0.40 / 9}],
             "total_calories": kcal,
             "total_protein": round(kcal * 0.12 / 4, 1),
+            "total_carbs": round(kcal * 0.45 / 4, 1),
+            "total_fat": round(kcal * 0.40 / 9, 1),
+            "confidence": 0.15,
+            "description": "Offline placeholder estimate",
+            "notes": "No vision provider configured. Add an API key in Settings.",
+        }
+
+    def estimate_meal(self, images: list[str], text: str | None = None) -> dict:
+        """Offline fallback mirroring the merged contract so tests can exercise
+        the multi-input endpoint without any network."""
+        if text:
+            return self.estimate_text(text)
+        # No text: fold image sizes into the placeholder so different uploads
+        # still produce distinct, deterministic output.
+        total = sum(os.path.getsize(p) for p in images if os.path.exists(p))
+        kcal = round(320 + (total % 400), 1)
+        return {
+            "items": [{"name": f"Mixed plate ({len(images)} photo(s), offline)",
+                       "grams": 350, "calories": kcal,
+                       "protein": kcal * 0.12 / 4, "carbs": kcal * 0.45 / 4,
+                       "fat": kcal * 0.40 / 9}],
+            "total_calories": kcal, "total_protein": round(kcal * 0.12 / 4, 1),
             "total_carbs": round(kcal * 0.45 / 4, 1),
             "total_fat": round(kcal * 0.40 / 9, 1),
             "confidence": 0.15,
@@ -531,3 +647,10 @@ def estimate_photo(image_path: str, settings: dict) -> tuple[dict, str, str]:
 def estimate_text(text: str, settings: dict) -> tuple[dict, str, str]:
     """Describe-a-meal path: same chain, text-only prompts."""
     return _run_chain(lambda p: p.estimate_text(text), settings)
+
+
+def estimate_meal(images: list[str], text: str | None,
+                  settings: dict) -> tuple[dict, str, str]:
+    """Merged path: any number of photos (food and/or label) plus optional
+    free-text context, resolved by the same provider chain."""
+    return _run_chain(lambda p: p.estimate_meal(images, text), settings)

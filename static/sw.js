@@ -2,7 +2,7 @@
    shell is served network-first so a deploy is picked up immediately; the cache
    is only an offline fallback. Asset URLs are build-versioned by the server, so
    stale code can't be reused even from this cache. */
-const CACHE = 'macrolog-shell-v5';
+const CACHE = 'macrolog-shell-v6';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
