@@ -11,6 +11,9 @@ import { join } from 'node:path';
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8790/';
 const COOKIE = process.argv[3] || '';
+// NOTE: run this against its OWN server instance (its own MACROLOG_DATA dir).
+// It writes meals and weights, which would otherwise perturb api_test's
+// consumed/trend assertions if both suites shared a database.
 // Optional: route the real hostname to a local port-forward (e.g. an SSH
 // tunnel) so headless Chrome can reach deployments that its network stack
 // cannot touch directly. TLS is still validated against the REAL hostname.
@@ -369,14 +372,18 @@ try {
     if (typeof closeSheets === 'function') closeSheets(); })()`);
   await sleep(600); drain();
 
-  // Fresh-ish account: log a weight 12 days ago, so both behaviors are visible.
-  await evalJson(`(async () => {
-    const d = new Date(Date.now() - 12*864e5);
-    const iso = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-    return fetch('/api/weight', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({value: 82.4, date: iso, unit: 'kg'})}).then(r=>r.status)
+  // The suite logs weights earlier (trend/grouping checks), and a same-day row
+  // legitimately suppresses both the prefill and the nudge -- so drive the
+  // precondition explicitly instead of assuming a pristine database: point
+  // state.last_weight at a stale date and re-render the dock.
+  await evalJson(`(() => {
+    const d = new Date(Date.now() - 12 * 864e5);
+    const iso = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    state.last_weight = { date: iso, kg: 82.4, days_ago: 12 };
+    $('w-value').value = ''; dockPrefill = false;
+    syncWeightDock();
   })()`);
-  await evalJson(`refresh()`); await sleep(1500); await watchdog();
+  await sleep(300);
 
   const dockStale = await evalJson(`(() => ({
     val: document.getElementById('w-value').value,
@@ -403,7 +410,7 @@ try {
   check('editing clears prefilled styling',
         await evalJson(`!document.getElementById('w-value').classList.contains('prefilled')`));
 
-  // Logging today's weight must remove the nag and the prefill.
+  // Now log for real: the POST plus refresh() must clear the nag and prefill.
   const errsW = jsErrors.length;
   await evalJson(`document.getElementById('btn-weight').click()`);
   await sleep(2500); await watchdog(); drain();
