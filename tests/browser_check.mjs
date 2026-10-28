@@ -418,6 +418,42 @@ try {
   check('dock confirms today is done', /logged today/.test(dockFresh.ph), dockFresh.ph);
   check('no prefill once today is logged', dockFresh.val === '', `val=${dockFresh.val}`);
 
+  // ---- Trend view must actually paint (regression: prepCanvas returned `h`
+  // while callers destructured `hh`, leaving every y-coordinate NaN so both
+  // canvases drew nothing and the screen looked like empty boxes). ----------
+  await evalJson(`(async () => {
+    for (let i = 20; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 864e5);
+      await fetch('/api/weight', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: +(90 - i * 0.22).toFixed(2), date: d.toISOString().slice(0, 10), unit: 'kg' }) });
+    }
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 864e5);
+      await fetch('/api/meals', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: 'trend meal ' + i, calories: 600, protein: 40, carbs: 60, fat: 18, date: d.toISOString().slice(0, 10) }) });
+    }
+  })()`);
+  await sleep(1200);
+  await evalJson(`document.querySelector('button[data-view="trend"]').click()`);
+  await sleep(2500); await watchdog(); drain();
+  const painted = await evalJson(`(() => {
+    const ink = (id) => { const c = document.getElementById(id);
+      const x = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+      for (let i = 3; i < x.length; i += 4) if (x[i] > 0) n++;
+      return { n, w: c.width, h: c.height }; };
+    return { weight: ink('chart-weight'), intake: ink('chart-intake') };
+  })()`);
+  check('weight chart paints pixels', painted.weight.n > 500, JSON.stringify(painted.weight));
+  check('intake chart paints pixels', painted.intake.n > 500, JSON.stringify(painted.intake));
+  // Canvas backing store must stay stable across redraws (the compounding bug).
+  const stab = await evalJson(`(async () => {
+    const h = await api('history?days=90'); const out = [];
+    for (let i = 0; i < 4; i++) { drawWeightChart(h); out.push(document.getElementById('chart-weight').height); }
+    return out; })()`);
+  check('canvas height stable across redraws', new Set(stab).size === 1 && stab[0] <= 400, JSON.stringify(stab));
+  check('trend stats populated', await evalJson(
+    `document.getElementById('trend-stats').textContent.includes('Current')`));
+
   // Screenshot for the record.
   const shot = await send('Page.captureScreenshot', { format: 'png' });
   const out = join(process.env.ML_SHOT_DIR || '.', 'settings-auto-button.png');

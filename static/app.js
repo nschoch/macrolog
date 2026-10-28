@@ -778,7 +778,14 @@ function renderAccuracy(acc) {
 function prepCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
-  const cssH = Number(canvas.getAttribute('height')) || 170;
+  // The authored height lives in the HTML attribute, but setting canvas.height
+  // below *overwrites that same attribute* -- reading it again on the next call
+  // returned an already-scaled number, doubling the backing store on every
+  // redraw (340 -> 680 -> ... -> 5440px after five tab switches) and pushing all
+  // drawing, including the empty-state text, far outside the visible box. Cache
+  // the intended CSS height on the element instead of re-reading the attribute.
+  if (!canvas._cssH) canvas._cssH = Number(canvas.getAttribute('height')) || 170;
+  const cssH = canvas._cssH;
   const w = Math.max(200, rect.width || 320);
   canvas.width = w * dpr;
   canvas.height = cssH * dpr;
@@ -786,7 +793,11 @@ function prepCanvas(canvas) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, cssH);
-  return { ctx, w, h: cssH };
+  // Callers destructure `hh`; returning it as `h` silently shadowed nothing and
+  // left every y-coordinate NaN, so both charts drew off-canvas and the Trend
+  // view looked like an empty box (broken since the initial commit -- the two
+  // names were never reconciled). Keep one name on both sides of this boundary.
+  return { ctx, w, hh: cssH };
 }
 
 function drawWeightChart(h) {
