@@ -674,6 +674,7 @@ $('btn-weight').addEventListener('click', async () => {
         date: viewDate || undefined }),
     });
     $('w-value').value = '';
+    dockPrefill = false;
     toast(res.adapted
       ? `Weight logged · target moved to ${fmt(res.target)} kcal (${res.delta > 0 ? '+' : ''}${res.delta})`
       : 'Weight logged');
@@ -681,11 +682,57 @@ $('btn-weight').addEventListener('click', async () => {
   } catch (err) { toast(err.message, true); }
 });
 
-// Keep the weight dock placeholder in sync with the active unit.
+// ------------------------------------------------------------- weight dock
+// Prefill the last weigh-in so logging daily is one tap, and turn the Log
+// button amber when it has been >7 days -- the adaptive target degrades fast
+// without fresh data, so this nudge matters more than a badge would.
+const STALE_WEIGHT_DAYS = 7;
+let dockPrefill = false;      // true while the field shows an untouched prefill
+
 function syncWeightDock() {
   const el = $('w-value');
-  if (el) el.placeholder = `weight (${U.wUnitLabel()})`;
+  if (!el) return;
+  el.placeholder = `weight (${U.wUnitLabel()})`;
+
+  const lw = state?.last_weight;
+  // Only prefill when the user hasn't started typing, so we never clobber an
+  // entry mid-edit (refresh() runs on every save and view change).
+  if (!dockPrefill && !el.value && lw && lw.days_ago >= 1) {
+    el.value = U.weightInt(lw.kg);
+    dockPrefill = true;
+  } else if (dockPrefill && el.value && !lw) {
+    el.value = ''; dockPrefill = false;
+  }
+  // Once today's weight exists there is nothing to prefill or nag about.
+  if (lw && lw.days_ago === 0) {
+    if (dockPrefill) { el.value = ''; dockPrefill = false; }
+    el.placeholder = `${U.wUnitLabel()} logged today ✓`;
+  }
+
+  el.classList.toggle('prefilled', dockPrefill);
+
+  const btn = $('btn-weight');
+  const stale = !!lw && lw.days_ago > STALE_WEIGHT_DAYS;
+  if (btn) {
+    btn.classList.toggle('warn', stale);
+    btn.title = stale
+      ? `Last weigh-in ${lw.days_ago} days ago — your target adapts best with daily weights`
+      : 'Log today’s weight';
+  }
+  const dock = $('weight-dock');
+  if (dock) dock.classList.toggle('stale', stale);
 }
+
+// Editing away from the prefill hands control back to the user.
+$('w-value').addEventListener('input', () => {
+  dockPrefill = false;
+  $('w-value').classList.remove('prefilled');
+});
+// Tapping a prefilled field selects it for quick overwrite rather than making
+// the user delete the old number first.
+$('w-value').addEventListener('focus', () => {
+  if (dockPrefill) setTimeout(() => $('w-value').select(), 30);
+});
 
 // --------------------------------------------------------------------- trend
 async function loadTrend() {

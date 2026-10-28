@@ -184,6 +184,14 @@ class Api:
             # defaults). Distinct from having logged a weight (weights_count).
             "needs_setup": not s.get("_profile_set"),
             "weights_count": len(rows),
+            # Newest weigh-in, so the dock can prefill it and warn when the
+            # user has gone too long without one (trend quality decays fast).
+            "last_weight": ({
+                "date": rows[-1]["date"],
+                "kg": float(rows[-1]["value"]),
+                "days_ago": max(0, (date.fromisoformat(str(t)[:10])
+                                    - date.fromisoformat(str(rows[-1]["date"])[:10])).days),
+            } if rows else None),
         }
 
     # ---- meals --------------------------------------------------------

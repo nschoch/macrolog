@@ -100,10 +100,19 @@ acc = hist.get("accuracy", {}).get("calories", {})
 check("accuracy tracks edits", acc.get("n", 0) >= 1, str(acc))
 
 # 6. weights drive the adaptive loop
-for i in range(21):
-    day = _day(i) if False else __import__("datetime").date.today() - __import__("datetime").timedelta(days=20 - i)
-    w = round(90 - i * 0.22, 2)
-    req("/api/weight", "POST", {"value": w, "date": day.isoformat()})
+# Two subtleties that made this check flap on reruns against a reused database:
+#  * values are keyed to days-before-today, so a second run upserts identical
+#    numbers instead of sliding the series;
+#  * unit="kg" is explicit because check 8b switches settings to imperial and
+#    the server reads an unlabelled value in the stored unit (90 posted as 90 lb
+#    became ~41 kg, halving the slope).
+import datetime as _dtw
+def _trend_weight(days_ago):
+    return round(90 - (20 - days_ago) * 0.22, 2)
+for _days_ago in range(20, -1, -1):
+    _d = _dtw.date.today() - _dtw.timedelta(days=_days_ago)
+    req("/api/weight", "POST", {"value": _trend_weight(_days_ago),
+                                "date": _d.isoformat(), "unit": "kg"})
 st, ar = req("/api/adapt", "POST", {})
 tr = ar.get("trend", {})
 check("weight trend reliable after 21 days", tr.get("reliable") is True, str(tr))
@@ -354,6 +363,47 @@ check("group labels are time-derived strings", all(isinstance(g["label"], str) a
 for m in gs["meals"]:
     if m["description"].startswith("g"):
         req(f"/api/meals/{m['id']}", "DELETE")
+
+# 23. last_weight drives the weight-dock prefill + staleness nudge.
+import datetime as _dt5
+def log_w(kg, days_ago):
+    d = (_dt5.date.today() - _dt5.timedelta(days=days_ago)).isoformat()
+    return req("/api/weight", "POST", {"value": kg, "date": d})
+
+# Deliberately placed before the adaptive-loop checks and confined to dates
+# outside TREND_WINDOW_DAYS: overwriting a recent day changes the regression's
+# endpoint and would make the slope assertions below flap.
+st, s0 = req("/api/state")
+lw0 = s0.get("last_weight") or {}
+check("state exposes last_weight object", bool(lw0), str(s0.get("last_weight")))
+check("last_weight carries date/kg/days_ago",
+      all(k in lw0 for k in ("date", "kg", "days_ago")), str(lw0))
+# Whatever the newest stored weigh-in is, days_ago must match its date.
+_exp_gap = (_dt5.date.today() - _dt5.date.fromisoformat(lw0["date"])).days if lw0.get("date") else None
+check("days_ago matches the reported date", lw0.get("days_ago") == _exp_gap, str(lw0))
+# kg must be the raw stored value for that date, not a trend-smoothed figure.
+st, hist0 = req("/api/history?days=900")
+row = next((w for w in hist0.get("weights", []) if w["date"] == lw0.get("date")), None)
+check("last_weight kg equals the raw stored value (not smoothed)",
+      row is not None and abs(lw0["kg"] - row["kg"]) < 0.011,
+      f"payload={lw0.get('kg')} row={row and row['kg']}")
+
+# Staleness must be computable from the payload alone: log a far-past weight on
+# a date nothing else touches, then confirm a client could detect >7 days by
+# comparing dates (the newest row still wins, which is the point).
+STALE = (_dt5.date.today() - _dt5.timedelta(days=400)).isoformat()
+st, _ = log_w(81.5, 400)
+st, s1 = req("/api/state")
+lw1 = s1.get("last_weight") or {}
+check("far-past entry does not displace a newer row",
+      lw1.get("date") == lw0.get("date"), f"{lw1} vs {lw0}")
+st, hist = req("/api/history?days=900")
+dates = [w["date"] for w in hist.get("weights", [])]
+check("past-dated weigh-in persisted", STALE in dates, f"{STALE} not in {len(dates)} rows")
+gap_days = (_dt5.date.fromisoformat(dates[-1]) - _dt5.date.fromisoformat(dates[0])).days
+check("history spans enough to compute staleness", gap_days >= 400, str(gap_days))
+
+
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

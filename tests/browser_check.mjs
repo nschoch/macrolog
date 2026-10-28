@@ -364,6 +364,60 @@ try {
     return raised; })()`);
   check('prev-arrow does not trigger date picker', pickerRaised === false);
 
+  // ---- Weight dock: prefill from last weigh-in + stale (>7d) nudge --------
+  await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
+    if (typeof closeSheets === 'function') closeSheets(); })()`);
+  await sleep(600); drain();
+
+  // Fresh-ish account: log a weight 12 days ago, so both behaviors are visible.
+  await evalJson(`(async () => {
+    const d = new Date(Date.now() - 12*864e5);
+    const iso = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    return fetch('/api/weight', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({value: 82.4, date: iso, unit: 'kg'})}).then(r=>r.status)
+  })()`);
+  await evalJson(`refresh()`); await sleep(1500); await watchdog();
+
+  const dockStale = await evalJson(`(() => ({
+    val: document.getElementById('w-value').value,
+    warn: document.getElementById('btn-weight').classList.contains('warn'),
+    stale: document.getElementById('weight-dock').classList.contains('stale'),
+    prefilled: document.getElementById('w-value').classList.contains('prefilled'),
+    title: document.getElementById('btn-weight').title }))()`);
+  check('dock prefills last weight', dockStale.val !== '' && Number(dockStale.val) > 0,
+        JSON.stringify(dockStale));
+  check('stale >7d turns Log button amber', dockStale.warn === true && dockStale.stale === true,
+        JSON.stringify(dockStale));
+  check('prefill marked as suggestion not typed input', dockStale.prefilled === true);
+  // Day count is derived from calendar dates, so assert it reports a plausible
+  // stale age rather than an exact number (DST can make 12x864e5 read as 11).
+  check('stale button explains itself via title',
+        /Last weigh-in \d+ days ago/.test(dockStale.title || '') &&
+          Number((dockStale.title.match(/\d+/) || [0])[0]) >= 7,
+        dockStale.title);
+
+  // Typing should clear the "suggestion" styling immediately.
+  await evalJson(`(() => { const el=document.getElementById('w-value');
+    el.value='80.1'; el.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+  await sleep(300);
+  check('editing clears prefilled styling',
+        await evalJson(`!document.getElementById('w-value').classList.contains('prefilled')`));
+
+  // Logging today's weight must remove the nag and the prefill.
+  const errsW = jsErrors.length;
+  await evalJson(`document.getElementById('btn-weight').click()`);
+  await sleep(2500); await watchdog(); drain();
+  check('weight log produced no JS error', jsErrors.length === errsW,
+        jsErrors.slice(errsW).join(' | ').slice(0,300));
+  const dockFresh = await evalJson(`(() => ({
+    warn: document.getElementById('btn-weight').classList.contains('warn'),
+    val: document.getElementById('w-value').value,
+    ph: document.getElementById('w-value').placeholder,
+    days: (state.last_weight||{}).days_ago }))()`);
+  check('same-day log clears stale warning', dockFresh.warn === false, JSON.stringify(dockFresh));
+  check('dock confirms today is done', /logged today/.test(dockFresh.ph), dockFresh.ph);
+  check('no prefill once today is logged', dockFresh.val === '', `val=${dockFresh.val}`);
+
   // Screenshot for the record.
   const shot = await send('Page.captureScreenshot', { format: 'png' });
   const out = join(process.env.ML_SHOT_DIR || '.', 'settings-auto-button.png');

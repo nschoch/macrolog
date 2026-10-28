@@ -277,9 +277,20 @@ button { cursor: pointer; }
   border-radius: 999px; padding: 6px 6px 6px 14px; box-shadow: 0 6px 22px rgba(0,0,0,.45);
 }
 .weight-dock input {
-  width: 108px; border: 0; background: none; margin: 0; padding: 6px 0; font-size: 14px;
+  /* Wide enough for the longest state it can show ("kg logged today ✓"); at
+     108px the confirmation was clipped to "…today A". */
+  width: 142px; min-width: 142px; border: 0; background: none; margin: 0;
+  padding: 6px 0; font-size: 14px;
 }
+.weight-dock input::placeholder { color: var(--muted); opacity: 1; white-space: nowrap; }
 .weight-dock input:focus { outline: none; }
+/* Stale weigh-in (>7 days): amber button + matching ring, so the dock reads as
+   "action needed" without any text competing for space. */
+#btn-weight.warn { background: #b9821f; color: #1a1405; }
+#btn-weight.warn:hover { background: #d99a2b; }
+.weight-dock.stale { border-color: #6b5320; }
+/* Prefilled value is a suggestion, not typed input: dim it until edited. */
+.weight-dock input.prefilled { color: var(--muted); font-style: italic; }
 
 /* ----------------------------------------------------------------- sheets */
 .sheet-backdrop {
