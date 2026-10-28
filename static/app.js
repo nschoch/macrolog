@@ -584,6 +584,14 @@ function clearStaged() {
 }
 
 function openAddSheet() {
+  // Start every entry from a clean slate. Clearing on OPEN rather than on each
+  // exit path matters because saves close via inline code (not closeSheets)
+  // and cancels come from several buttons -- any one of them forgetting a reset
+  // used to leave the previous meal's note sitting in the box, ready to be
+  // estimated again as if it were the new one.
+  $('a-text').value = '';
+  clearStaged();
+  stagedForSave = [];
   $('add-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
   renderTray();
@@ -658,6 +666,7 @@ $('btn-estimate-meal').addEventListener('click', async () => {
 $('btn-enter-values').addEventListener('click', () => {
   $('add-sheet').hidden = true;
   ['m-desc', 'm-cal', 'm-pro', 'm-car', 'm-fat'].forEach(id => { $(id).value = ''; });
+  $('m-kind').value = 'auto';   // don't inherit the previous entry's meal type
   $('manual-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
 });

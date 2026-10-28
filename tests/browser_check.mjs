@@ -418,6 +418,21 @@ try {
   check('dock confirms today is done', /logged today/.test(dockFresh.ph), dockFresh.ph);
   check('no prefill once today is logged', dockFresh.val === '', `val=${dockFresh.val}`);
 
+  // ---- Each new entry starts blank (regression: the note from the previous
+  // meal persisted into the next sheet, so it got estimated/saved again). ----
+  const reset = await evalJson(`(() => {
+    openAddSheet();
+    document.getElementById('a-text').value = 'leftover note from last meal';
+    stageFile(new File([new Uint8Array(400)], 'x.jpg', { type: 'image/jpeg' }));
+    closeSheets();                 // user cancels
+    openAddSheet();                // next entry
+    return { text: document.getElementById('a-text').value,
+             staged: stagedPhotos.length, forSave: stagedForSave.length };
+  })()`);
+  check('note does not persist to the next entry', reset.text === '', JSON.stringify(reset));
+  check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
+        JSON.stringify(reset));
+
   // ---- Trend view must actually paint (regression: prepCanvas returned `h`
   // while callers destructured `hh`, leaving every y-coordinate NaN so both
   // canvases drew nothing and the screen looked like empty boxes). ----------
