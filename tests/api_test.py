@@ -459,6 +459,70 @@ check("normalize clamps per-item fiber to its carbs",
 check("normalize sums fiber rather than trusting a wild total",
       n["fiber"] == 7.0, str(n.get("fiber")))
 
+# 27. Client timezone: wall-clock times must be stored as typed, not shifted.
+import datetime as _dt6
+from zoneinfo import ZoneInfo as _ZI
+PT = _ZI("America/Los_Angeles")
+
+def req_tz(path, method="GET", body=None, tz="America/Los_Angeles"):
+    headers = {"X-Client-TZ": tz, "Content-Type": "application/json"}
+    r = urllib.request.Request(BASE + path, method=method, headers=headers,
+        data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.urlopen(r, timeout=25) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+today_pt = _dt6.datetime.now(PT).date().isoformat()
+made = []
+for hm, kcal in (("07:25", 90), ("12:35", 400), ("19:10", 700)):
+    st, out = req_tz("/api/meals", "POST", {
+        "description": "tz " + hm, "calories": kcal, "protein": 10, "carbs": 20,
+        "fat": 8, "date": today_pt, "time": hm, "source": "manual"})
+    made.append((out.get("id"), hm))
+    check(f"meal at {hm} accepted", st in (200, 201) and out.get("id"), str(st))
+
+st, sd = req_tz("/api/state")
+byid = {m["id"]: m for m in sd.get("meals", [])}
+offsets = []
+for mid, hm in made:
+    m = byid.get(mid)
+    if not m:
+        offsets.append(None); continue
+    local = _dt6.datetime.fromtimestamp(m["ts"], PT).strftime("%H:%M")
+    offsets.append(local)
+check("stored epoch equals the wall-clock time the user typed",
+      offsets == ["07:25", "12:35", "19:10"], str(offsets))
+
+# Grouping follows the user's clock, which was the visible symptom.
+groups = {mid: next((g["label"] for g in sd.get("groups", []) if mid in g["meal_ids"]), None)
+          for mid, _ in made}
+check("07:25 groups as Breakfast", groups.get(made[0][0]) == "Breakfast", str(groups))
+check("12:35 groups as Lunch", groups.get(made[1][0]) == "Lunch", str(groups))
+check("19:10 groups as Dinner", groups.get(made[2][0]) == "Dinner", str(groups))
+
+# The same rows read from another zone must shift by 8h, proving the zone is
+# per-request rather than baked into the stored data.
+st, sd_ldn = req_tz("/api/state", tz="Europe/London")
+london = {m["id"]: m for m in sd_ldn.get("meals", [])}
+LDN = _ZI("Europe/London")
+lunch_ts = byid[made[1][0]]["ts"]
+ldn_local = _dt6.datetime.fromtimestamp(lunch_ts, LDN).strftime("%H:%M")
+pt_local = _dt6.datetime.fromtimestamp(lunch_ts, PT).strftime("%H:%M")
+# Derive the expected London wall clock rather than hardcoding it: DST means the
+# offset varies by season (a hardcoded 20:35 was wrong once BST ended).
+expected = (_dt6.datetime.fromtimestamp(lunch_ts, PT)
+            .astimezone(LDN).strftime("%H:%M"))
+check("the same meal reads differently from another zone",
+      ldn_local == expected and ldn_local != pt_local, f"{ldn_local} vs PT {pt_local}")
+check("payload identical regardless of viewer zone",
+      london[made[1][0]]["ts"] == lunch_ts, str(ldn_local))
+
+for mid, _ in made:
+    if mid:
+        req_tz(f"/api/meals/{mid}", "DELETE")
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))

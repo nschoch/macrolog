@@ -136,23 +136,45 @@ except Exception:                                     # pragma: no cover
     APP_TZ = None
 
 
-def now_local() -> datetime:
-    """Wall-clock time in the household timezone (UTC if zoneinfo unavailable)."""
-    return datetime.now(APP_TZ) if APP_TZ else datetime.now()
+def resolve_tz(name: str | None):
+    """Zone for a client-supplied IANA name, falling back to the household one.
+
+    Each request may carry the browser's own zone, because a family member
+    travelling (or a device with a different zone) must not have their meal
+    times reinterpreted in someone else's timezone.
+    """
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return APP_TZ
 
 
-def today_str() -> str:
-    return now_local().date().isoformat()
+def now_local(tz=None) -> datetime:
+    """Wall-clock time in the given zone (or the household zone)."""
+    zone = tz or APP_TZ
+    return datetime.now(zone) if zone else datetime.now()
 
 
-def local_ts_for(date_str: str, fallback_hour: int = 12) -> int:
+def today_str(tz=None) -> str:
+    return now_local(tz).date().isoformat()
+
+
+def local_ts_for(date_str: str, fallback_hour: int = 12, tz=None) -> int:
+    """Epoch for "now" on `date_str`, interpreted in `tz`.
+
+    The datetime must be timezone-AWARE. A naive datetime is interpreted by the
+    host clock, and the LXC runs UTC, so a 12:35 lunch was stored as 12:35 UTC
+    (= 05:35 Pacific) -- which then displayed and grouped seven hours early.
+    """
     try:
         d = date.fromisoformat(date_str)
     except ValueError:
         return int(time.time())
-    now = datetime.now()
+    now = now_local(tz)
     return int(datetime(d.year, d.month, d.day, now.hour or fallback_hour,
-                        now.minute).timestamp())
+                        now.minute, tzinfo=tz or APP_TZ).timestamp())
 
 
 # ============================================================== API handlers
@@ -164,8 +186,10 @@ class Api:
     def GET_state(h, q, body):
         owner = getattr(h, "owner", "default")
         s = get_settings(owner)
-        # ?date=YYYY-MM-DD browses a past day; absent/invalid = today.
-        t = today_str()
+        # ?date=YYYY-MM-DD browses a past day; absent/invalid = today in the
+        # caller's own timezone.
+        tz = h._tz()
+        t = today_str(tz)
         want = (q.get("date") or [""])[0]
         if want:
             try:
@@ -192,7 +216,7 @@ class Api:
         return 200, {
             "date": t, "meals": dicts,
             # Derived eatings (see group_meals); gap is user-tunable.
-            "groups": group_meals(dicts, int(s.get("meal_gap_minutes") or 45)),
+            "groups": group_meals(dicts, int(s.get("meal_gap_minutes") or 45), tz=tz),
             "consumed": consumed, "targets": targets, "trend": trend,
             "settings": _public_settings(s), "providers": providers,
             "active_provider": ready[0] if ready else "stub",
@@ -344,8 +368,9 @@ class Api:
             if cand and not os.path.abspath(str(cand)).startswith(
                     os.path.abspath(PHOTO_DIR)):
                 return 400, {"error": "invalid photo path"}
-        d = body.get("date") or today_str()
-        ts = _parse_when(body, default_date=d)
+        tz = h._tz()
+        d = body.get("date") or today_str(tz)
+        ts = _parse_when(body, default_date=d, tz=tz)
         items = _sanitize_items(body.get("items"))
         meal = {
             "description": str(body.get("description") or "")[:200],
@@ -412,6 +437,7 @@ class Api:
         if body.get("date") or body.get("time"):
             new_date = body.get("date") or old["date"]
             upd_ts = _parse_when({**body, "date": new_date}, default_date=new_date,
+                                 tz=h._tz(),
                                  fallback_ts=old["ts"])
             db.execute("UPDATE meals SET date=?, ts=? WHERE id=? AND owner=?",
                        (new_date, upd_ts, mid, owner))
@@ -456,8 +482,8 @@ class Api:
         val = raw / LB_PER_KG if unit in ("lb", "imperial", "lbs") else raw
         if val <= 0 or val > 700:      # validated in canonical kg
             return 400, {"error": "weight out of range"}
-        d = body.get("date") or today_str()
-        db.set_weight(d, local_ts_for(d), round(val, 2), owner)
+        d = body.get("date") or today_str(h._tz())
+        db.set_weight(d, local_ts_for(d, tz=h._tz()), round(val, 2), owner)
         if body.get("body_fat") is not None:
             bf = float(body["body_fat"])
             if 1 <= bf <= 70:
@@ -474,7 +500,7 @@ class Api:
     def GET_history(h, q, body):
         owner = getattr(h, "owner", "default")
         days = int((q.get("days") or ["90"])[0])
-        start = (now_local().date() - timedelta(days=days)).isoformat()
+        start = (now_local(h._tz()).date() - timedelta(days=days)).isoformat()
         meals = db.query(
             "SELECT date, SUM(calories) c, SUM(protein) p, SUM(carbs) cb, "
             "SUM(fat) f, SUM(fiber) fb, COUNT(*) n FROM meals "
@@ -726,28 +752,34 @@ def _sum_items(items: list[dict]) -> dict:
     return {k: round(v, 1) for k, v in tot.items()}
 
 
-def _parse_when(body: dict, default_date: str, fallback_ts: int | None = None) -> int:
+def _parse_when(body: dict, default_date: str, fallback_ts: int | None = None,
+                tz=None) -> int:
     """Resolve a meal's epoch ts from optional date (YYYY-MM-DD) + time (HH:MM).
 
-    Missing time keeps the current clock time on that day; missing both falls
-    back to local_ts_for(default_date) so behaviour matches the old path.
+    Every conversion is tz-aware so the wall-clock time the user typed is the
+    time actually stored -- see local_ts_for for why naive datetimes are wrong
+    on this host.
     """
+    zone = tz or APP_TZ
     d = body.get("date") or default_date
     t = body.get("time")
     try:
         dt = date.fromisoformat(str(d)[:10])
     except ValueError:
-        return fallback_ts if fallback_ts is not None else local_ts_for(default_date)
+        return fallback_ts if fallback_ts is not None else local_ts_for(default_date, tz=zone)
     if t and re.match(r"^\d{1,2}:\d{2}", str(t)):
         hh, mm = str(t)[:5].split(":")
         return int(datetime(dt.year, dt.month, dt.day,
-                            min(23, int(hh)), min(59, int(mm))).timestamp())
+                            min(23, int(hh)), min(59, int(mm)),
+                            tzinfo=zone).timestamp())
     if fallback_ts is not None:
         # Keep the existing clock time-of-day when only the date changed.
-        base = datetime.fromtimestamp(fallback_ts)
-        return int(datetime(dt.year, dt.month, dt.day, base.hour, base.minute).timestamp())
-    now = datetime.now()
-    return int(datetime(dt.year, dt.month, dt.day, now.hour, now.minute).timestamp())
+        base = datetime.fromtimestamp(fallback_ts, zone)
+        return int(datetime(dt.year, dt.month, dt.day, base.hour, base.minute,
+                            tzinfo=zone).timestamp())
+    now = now_local(zone)
+    return int(datetime(dt.year, dt.month, dt.day, now.hour, now.minute,
+                        tzinfo=zone).timestamp())
 
 
 def _provider_warning(errors: list) -> str:
@@ -789,7 +821,7 @@ MEAL_WINDOWS = (("breakfast", 0, 10.5), ("lunch", 10.5, 15.0),
                 ("dinner", 15.0, 21.0), ("snack", 21.0, 24.0))
 
 
-def group_meals(meals: list[dict], gap_minutes: int = 45) -> list[dict]:
+def group_meals(meals: list[dict], gap_minutes: int = 45, tz=None) -> list[dict]:
     """Cluster a day's meals into eatings by time proximity.
 
     Deliberately derived, not stored: the user logs one dish at a time (a photo
@@ -820,7 +852,8 @@ def group_meals(meals: list[dict], gap_minutes: int = 45) -> list[dict]:
         start_ts = min((m.get("ts") or 0) for m in cluster)
         # Interpret the epoch in the household zone so Breakfast/Lunch/Dinner
         # boundaries match the user's day, not the UTC host clock.
-        _local = (datetime.fromtimestamp(start_ts, APP_TZ) if APP_TZ
+        _zone = tz or APP_TZ
+        _local = (datetime.fromtimestamp(start_ts, _zone) if _zone
                   else datetime.fromtimestamp(start_ts))
         hour = _local.hour + _local.minute / 60.0
         name = next((lbl for lbl, lo, hi in MEAL_WINDOWS if lo <= hour < hi),
@@ -914,6 +947,11 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
 
     # -- helpers ---------------------------------------------------------
+    def _tz(self):
+        """The requesting browser's timezone, so a meal typed at 12:35 local is
+        stored at 12:35 local no matter what zone the server runs in."""
+        return resolve_tz(self.headers.get("X-Client-TZ"))
+
     def _cookies(self) -> dict:
         raw = self.headers.get("Cookie", "")
         jar = {}

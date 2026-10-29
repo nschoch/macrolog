@@ -512,6 +512,22 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- The browser must tell the server its own timezone ----------------
+  const tzHeader = await evalJson(`(async () => {
+    const seen = [];
+    const orig = window.fetch;
+    window.fetch = function (u, o) {
+      try { seen.push(new Headers((o && o.headers) || {}).get('X-Client-TZ')); } catch (e) {}
+      return orig.apply(this, arguments);
+    };
+    try { await api('state'); } finally { window.fetch = orig; }
+    return JSON.stringify({ browser: clientTz(), sent: seen[0] || null,
+                            allSent: seen.every(v => !!v) });
+  })()`);
+  const tzh = JSON.parse(tzHeader);
+  check('client reports an IANA timezone', /^[A-Za-z]+\/[A-Za-z_]+/.test(tzh.browser || ''), tzHeader);
+  check('every API call carries X-Client-TZ', tzh.allSent === true && tzh.sent === tzh.browser, tzHeader);
+
   // ---- Consumed / Remaining toggle + fiber shown inside carbs ------------
   const modes = await evalJson(`(() => {
     document.querySelector('#macro-mode button[data-mode="remaining"]').click();

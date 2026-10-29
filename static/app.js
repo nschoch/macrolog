@@ -62,8 +62,17 @@ const U = {
 };
 
 // ------------------------------------------------------------------ helpers
+// The browser's IANA zone. Sent on every request so the server interprets the
+// wall-clock times we post (and "today") in the user's timezone rather than the
+// server's. Recomputed per call so a device that changes zone self-corrects.
+function clientTz() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }
+  catch (_) { return ''; }
+}
+
 async function api(path, opts = {}) {
-  const res = await fetchWithTimeout('/api/' + path, opts);
+  const res = await fetchWithTimeout('/api/' + path,
+    { ...opts, headers: { ...(opts.headers || {}), 'X-Client-TZ': clientTz() } });
   let data = {};
   try { data = await res.json(); } catch (_) { /* empty body */ }
   if (res.status === 401 && data.login) {
@@ -869,7 +878,7 @@ $('btn-estimate-meal').addEventListener('click', async () => {
     }
     if (text) form.append('text', text);
     const res = await fetchWithTimeout('/api/estimate-meal',
-                                       { method: 'POST', body: form }, 75000);
+      { method: 'POST', body: form, headers: { 'X-Client-TZ': clientTz() } }, 75000);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Estimate failed');
     $('add-sheet').hidden = true;
