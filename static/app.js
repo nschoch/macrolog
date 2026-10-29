@@ -384,6 +384,20 @@ function refreshTotals() {
   $('r-totals-wrap').style.display = hasComps ? 'block' : 'none';
 }
 
+// Push an item's recomputed macros into its existing row inputs. The focused
+// element is skipped deliberately -- rewriting value on the field being typed
+// into resets the caret even without a full re-render.
+function syncRowFromItem(row, it) {
+  for (const inp of row.querySelectorAll('input[data-f]')) {
+    const f = inp.dataset.f;
+    if (inp === document.activeElement) continue;
+    const v = it[f];
+    const shown = (f === 'protein' || f === 'fat' || f === 'carbs')
+      ? String(+(+v).toFixed(1)) : String(Math.round(+v || 0));
+    if (inp.value !== shown) inp.value = shown;
+  }
+}
+
 function renderCompEditor() {
   const wrap = $('r-items');
   if (!compItems.length) { wrap.innerHTML = ''; refreshTotals(); return; }
@@ -452,9 +466,19 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
 $('r-items').addEventListener('input', (ev) => {
   const row = ev.target.closest('.item-row'); if (!row) return;
   const idx = +row.dataset.i, f = ev.target.dataset.f, raw = ev.target.value;
+  const it = compItems[idx]; if (!it) return;
   if (f === 'name') { compItems[idx].name = raw; return; }
   const val = Number(raw) || 0;
-  if (f === 'grams') { rescaleItem(compItems[idx], val); renderCompEditor(); return; }
+  if (f === 'grams') {
+    rescaleItem(compItems[idx], val);
+    // Do NOT re-render the editor here: replacing innerHTML destroys the very
+    // input being typed into, so the caret jumped to the start on every keystroke
+    // and iOS dismissed the keyboard. Update the sibling fields in place instead;
+    // only structural changes (add/remove item) warrant a full rebuild.
+    syncRowFromItem(row, it);
+    refreshTotals();
+    return;
+  }
   compItems[idx][f] = val;
   refreshTotals();
 });
@@ -646,7 +670,7 @@ $('btn-estimate-meal').addEventListener('click', async () => {
     }
     if (text) form.append('text', text);
     const res = await fetchWithTimeout('/api/estimate-meal',
-                                       { method: 'POST', body: form }, 90000);
+                                       { method: 'POST', body: form }, 75000);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Estimate failed');
     $('add-sheet').hidden = true;

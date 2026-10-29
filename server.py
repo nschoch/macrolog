@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote as _urlquote, unquote as _urlunquote
@@ -124,8 +124,25 @@ def save_user_settings(owner: str, updates: dict) -> None:
     db.set_setting(f"settings:{owner}", cur)
 
 
+# The app is single-household and its users live in one timezone, but the LXC
+# runs UTC -- so after ~5pm Pacific the server's "today" rolled to tomorrow and
+# the whole day's meals vanished from the Today view (they were never deleted,
+# just filed under a date the UI no longer asked for). Resolve "today" through
+# an explicit zone instead of the host clock.
+try:
+    from zoneinfo import ZoneInfo
+    APP_TZ = ZoneInfo(os.environ.get("MACROLOG_TZ", "America/Los_Angeles"))
+except Exception:                                     # pragma: no cover
+    APP_TZ = None
+
+
+def now_local() -> datetime:
+    """Wall-clock time in the household timezone (UTC if zoneinfo unavailable)."""
+    return datetime.now(APP_TZ) if APP_TZ else datetime.now()
+
+
 def today_str() -> str:
-    return date.today().isoformat()
+    return now_local().date().isoformat()
 
 
 def local_ts_for(date_str: str, fallback_hour: int = 12) -> int:
@@ -452,7 +469,7 @@ class Api:
     def GET_history(h, q, body):
         owner = getattr(h, "owner", "default")
         days = int((q.get("days") or ["90"])[0])
-        start = (date.today() - __import__("datetime").timedelta(days=days)).isoformat()
+        start = (now_local().date() - timedelta(days=days)).isoformat()
         meals = db.query(
             "SELECT date, SUM(calories) c, SUM(protein) p, SUM(carbs) cb, "
             "SUM(fat) f, COUNT(*) n FROM meals WHERE date >= ? AND owner=? GROUP BY date "
@@ -785,8 +802,11 @@ def group_meals(meals: list[dict], gap_minutes: int = 45) -> list[dict]:
     seen_labels: dict[str, int] = {}
     for idx, cluster in enumerate(clusters, start=1):
         start_ts = min((m.get("ts") or 0) for m in cluster)
-        hour = datetime.fromtimestamp(start_ts).hour + \
-            datetime.fromtimestamp(start_ts).minute / 60.0
+        # Interpret the epoch in the household zone so Breakfast/Lunch/Dinner
+        # boundaries match the user's day, not the UTC host clock.
+        _local = (datetime.fromtimestamp(start_ts, APP_TZ) if APP_TZ
+                  else datetime.fromtimestamp(start_ts))
+        hour = _local.hour + _local.minute / 60.0
         name = next((lbl for lbl, lo, hi in MEAL_WINDOWS if lo <= hour < hi),
                     "snack")
         explicit = {m.get("kind") for m in cluster

@@ -190,6 +190,8 @@ try {
   await sleep(200); drain();   // drop any events from setup before baseline
   check('initial load has no JS errors', jsErrors.length === 0, jsErrors.join(' | ').slice(0, 300));
 
+
+
   // Switch to Settings view.
   await evalJson(`document.querySelector('button[data-view="settings"]').click()`);
   await sleep(1200); drain();
@@ -199,6 +201,12 @@ try {
       viewActive: document.getElementById('view-settings').classList.contains('active')}))`);
 
   let s0 = await btnState();
+  // Reset the pinned target first: the toggle assertions below need the
+  // "auto" starting state, and an earlier run may have left a locked value.
+  await evalJson(`fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ calorie_target: null }) }).then(r => r.json()).then(d => d.settings.calorie_target ?? null)`);
+  await evalJson(`refresh()`); await sleep(900);
+  s0 = await btnState();
   check('settings view active', s0.viewActive);
   check('button shows "auto" on fresh account (calorie_target null)', s0.label === 'auto', `label=${s0.label}`);
 
@@ -277,6 +285,16 @@ try {
     if (m) await fetch('/api/meals/' + m.id, { method: 'DELETE' });
     return m ? m.id : null;
   })()`);
+
+  // Pin the offline stub provider before any estimate call: hitting the live
+  // model costs 60-200s per call and is flaky, which made these checks slow and
+  // nondeterministic. api_test does the same; tests must not depend on an
+  // external API. Placed after the settings assertions because PUT merges into
+  // the same row and would otherwise persist state across runs.
+  const pinned = await evalJson(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providers: [{ kind: 'stub' }] }) }).then(r => r.status)`);
+  if (pinned !== 200) console.log('[harness] warning: could not pin stub provider (' + pinned + ')');
 
   // ---- Unified Add-meal sheet: photos + text composed into one estimate ----
   await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
@@ -424,6 +442,46 @@ try {
   check('same-day log clears stale warning', dockFresh.warn === false, JSON.stringify(dockFresh));
   check('dock confirms today is done', /logged today/.test(dockFresh.ph), dockFresh.ph);
   check('no prefill once today is logged', dockFresh.val === '', `val=${dockFresh.val}`);
+
+  // ---- Caret/DOM stability while editing estimated component values.
+  // Regression: typing grams re-rendered the whole editor (innerHTML), which
+  // destroys the focused input -- so the caret reset and iOS dismissed the
+  // keyboard on every keystroke. ----
+  const caretRaw = await evalJson(`(() => {
+    try {
+      openReview({ estimate: { description: 'x', calories: 500, protein: 30, carbs: 50,
+                               fat: 15, items: [{ name: 'rice', grams: 100, calories: 130,
+                               protein: 2.7, carbs: 28, fat: 0.3 }] } });
+      const sel = '.item-row[data-i="0"] input[data-f="grams"]';
+      const before = document.querySelector(sel);
+      if (!before) return JSON.stringify({ fatal: 'no grams input' });
+      before.focus();
+      const focusedBefore = document.activeElement === before;
+      before.value = '1005';
+      before.dispatchEvent(new Event('input', { bubbles: true }));
+      const after = document.querySelector(sel);
+      return JSON.stringify({
+        focusedBefore,
+        sameNode: before === after,                 // element not replaced
+        stillFocused: document.activeElement === before,
+        valueKeepsTyping: after.value === '1005',   // not clobbered by re-render
+        grams: compItems[0].grams,
+        kcal: document.querySelector('.item-row[data-i="0"] input[data-f="calories"]').value,
+        protein: document.querySelector('.item-row[data-i="0"] input[data-f="protein"]').value,
+        rowsAfter: document.querySelectorAll('.item-row').length,
+      });
+    } catch (e) {
+      return JSON.stringify({ fatal: String(e && e.message || e) });
+    }
+  })()`);
+  const caretObj = JSON.parse(caretRaw);
+  check('editing grams keeps the same input element',
+        !caretObj.fatal && caretObj.sameNode && caretObj.stillFocused, caretRaw);
+  check('typed text is not clobbered mid-edit', caretObj.valueKeepsTyping === true, caretRaw);
+  check('derived macros update in place without re-render',
+        caretObj.grams === 1005 && Number(caretObj.kcal) > 130
+        && Number(caretObj.protein) > 2.7 && caretObj.rowsAfter === 1, caretRaw);
+  await evalJson(`closeSheets()`);
 
   // ---- Each new entry starts blank (regression: the note from the previous
   // meal persisted into the next sheet, so it got estimated/saved again). ----

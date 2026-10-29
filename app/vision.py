@@ -293,7 +293,7 @@ class GeminiProvider:
                                         "responseMimeType": "application/json"}}
         data = _post(f"{self.base}/v1beta/models/{self.model}:generateContent",
                      payload, {"x-goog-api-key": self.key},
-                     timeout=45 if not images else 90)
+                     timeout=45 if not images else 60)
         try:
             got = data["candidates"][0]["content"]["parts"]
         except (KeyError, IndexError):
@@ -401,7 +401,7 @@ class OpenAICompatProvider:
             payload["response_format"] = {"type": "json_object"}
         data = _post(f"{self.base}/chat/completions", payload,
                      {"Authorization": f"Bearer {self.key}"},
-                     timeout=45 if not images else 90)
+                     timeout=45 if not images else 60)
         try:
             out = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
