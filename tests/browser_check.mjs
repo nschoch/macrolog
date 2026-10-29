@@ -512,6 +512,55 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- Portion scaling: editing grams rescales macros and persists -------
+  const scale = await evalJson(`(() => {
+    openReview({ estimate: { description: 'scale probe', calories: 380, protein: 28.7,
+                             carbs: 28, fat: 15.3, items: [
+      { name: 'rice', grams: 100, calories: 130, protein: 2.7, carbs: 28, fat: 0.3 },
+      { name: 'beef', grams: 100, calories: 250, protein: 26, carbs: 0, fat: 15 }] } });
+    const g = document.querySelector('.item-row[data-i="0"] input[data-f="grams"]');
+    g.value = '200'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    const doubled = [compItems[0].grams, compItems[0].calories, compItems[0].protein,
+                     compItems[0].carbs, compItems[0].fat];
+    const otherUntouched = [compItems[1].grams, compItems[1].calories];
+    const shownKcal = document.querySelector('.item-row[data-i="0"] input[data-f="calories"]').value;
+    const totals = document.getElementById('r-total-shown').textContent.trim();
+    g.value = '100'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    return JSON.stringify({ doubled, otherUntouched, shownKcal, totals,
+                            reverted: [compItems[0].grams, compItems[0].calories] });
+  })()`);
+  const sc = JSON.parse(scale);
+  check('editing grams rescales kcal/protein/carbs/fat',
+        JSON.stringify(sc.doubled) === JSON.stringify([200, 260, 5.4, 56, 0.6]), scale);
+  check('other items are left alone', JSON.stringify(sc.otherUntouched) === JSON.stringify([100, 250]), scale);
+  check('rescaled value is written back into the row', sc.shownKcal === '260', scale);
+  check('meal totals follow the new portion', /510 kcal/.test(sc.totals), sc.totals);
+  check('scaling is reversible (density preserved)',
+        JSON.stringify(sc.reverted) === JSON.stringify([100, 130]), scale);
+  await evalJson(`closeSheets()`);
+
+  // An item with no starting weight cannot scale -- it must say so rather than
+  // appear to ignore the edit.
+  const zg = await evalJson(`(() => {
+    openReview({ estimate: { description: 'x', calories: 250, protein: 12.5, carbs: 28,
+                             fat: 11, items: [{ name: 'mystery', grams: 0, calories: 250,
+                             protein: 12.5, carbs: 28, fat: 11 }] } });
+    const hintEl = document.getElementById('r-scale-hint');
+    const label = document.querySelector('.item-row[data-i="0"] .ir-cell label').textContent;
+    const before = !hintEl.hidden;
+    const g = document.querySelector('.item-row[data-i="0"] input[data-f="grams"]');
+    g.value = '150'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    return JSON.stringify({ hinted: before, label, grams: compItems[0].grams,
+                            kcalKept: compItems[0].calories,
+                            hintClearedAfterWeight: !hintEl.hidden });
+  })()`);
+  const z = JSON.parse(zg);
+  check('zero-weight item flags that it cannot scale', z.hinted === true && z.label.includes('*'), zg);
+  check('zero-weight item records grams without inventing macros',
+        z.grams === 150 && z.kcalKept === 250, zg);
+  check('hint clears once a weight exists', z.hintClearedAfterWeight === false, zg);
+  await evalJson(`closeSheets()`);
+
   // ---- Provider editor (LOCAL ONLY) -------------------------------------
   // This section PUTs /api/settings {providers}, and providers are SHARED
   // across all users -- running it against production would replace the real

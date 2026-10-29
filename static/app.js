@@ -353,7 +353,16 @@ function todayISO() { const d = new Date(); return `${d.getFullYear()}-${String(
 
 // Recompute a component's macros from grams, preserving per-gram density.
 function rescaleItem(it, newGrams) {
-  if (!it.grams || it.grams <= 0 || newGrams === it.grams) { it.grams = newGrams; return it; }
+  // Scale macros by the change in portion, preserving per-gram density so the
+  // edit is reversible (200g -> 100g returns the original numbers).
+  if (!it.grams || it.grams <= 0) {
+    // No baseline weight to derive density from -- e.g. a text-described item
+    // where the model gave macros but no grams. Record what the user typed and
+    // leave the macros alone rather than silently doing nothing.
+    it.grams = newGrams;
+    return it;
+  }
+  if (newGrams === it.grams) return it;
   const k = newGrams / it.grams;
   it.grams = newGrams;
   it.calories = +(it.calories * k).toFixed(1);
@@ -382,6 +391,16 @@ function refreshTotals() {
   }
   $('r-nocomp-hint').hidden = hasComps;
   $('r-totals-wrap').style.display = hasComps ? 'block' : 'none';
+
+  // Explain the asterisk on the g label: with no starting weight there is no
+  // per-gram density to scale by, so a grams edit cannot adjust macros. Evaluated
+  // last so it tracks the value the user just typed rather than the stale one.
+  const hint = $('r-scale-hint');
+  if (hint) {
+    const needsHint = compItems.some(i => !(+i.grams > 0));
+    hint.hidden = !needsHint || !hasComps;
+    if (!hint.hidden) hint.textContent = '* this item has no portion weight to scale from \u2014 set its calories/macros directly, or give it a weight first.';
+  }
 }
 
 // Push an item's recomputed macros into its existing row inputs. The focused
@@ -408,7 +427,7 @@ function renderCompEditor() {
         <button class="ir-del" title="Remove" data-del="${idx}">×</button>
       </div>
       <div class="ir-grid">
-        <div class="ir-cell"><label>g</label><input type="number" inputmode="numeric" value="${+it.grams||''}" data-f="grams"></div>
+        <div class="ir-cell"><label>g${(+it.grams > 0) ? '' : ' *'}</label><input type="number" inputmode="numeric" value="${+it.grams||''}" data-f="grams"></div>
         <div class="ir-cell"><label>kcal</label><input type="number" inputmode="numeric" value="${Math.round(it.calories)||''}" data-f="calories"></div>
         <div class="ir-cell"><label>P g</label><input type="number" inputmode="numeric" value="${(+it.protein).toFixed(1)}" data-f="protein"></div>
         <div class="ir-cell"><label>C g</label><input type="number" inputmode="numeric" value="${(+it.carbs).toFixed(1)}" data-f="carbs"></div>
