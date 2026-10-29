@@ -132,10 +132,40 @@ class Database:
             if "owner" not in cols:
                 self._conn.execute(
                     f"ALTER TABLE {tbl} ADD COLUMN owner TEXT NOT NULL DEFAULT 'default'")
-        # Drop legacy single-column unique indexes, then (re)create owner-scoped ones.
-        # On an old weights/body_fat DB the pre-existing idx on (date) alone would
-        # conflict with per-user rows, so drop-if-exists first regardless of source.
-        self._conn.execute("DROP INDEX IF EXISTS idx_meals_date_legacy")
+        # Drop every legacy UNIQUE index that keys on date WITHOUT owner, then
+        # (re)create the owner-scoped ones. Pre-multi-user databases enforced one
+        # row per date across the whole household; once several OIDC users share
+        # the file that constraint makes a second user's weigh-in fail with
+        # "UNIQUE constraint failed: weights.date" even though the upsert targets
+        # (owner, date). Detecting by columns -- rather than dropping a fixed list
+        # of names -- means this also cleans up whatever those indexes were called.
+        for tbl, want in (("meals", ("owner", "date")),
+                          ("weights", ("owner", "date")),
+                          ("body_fat", ("owner", "date")),
+                          ("exercises", ("owner", "date"))):
+            # Materialize the list first: iterating a live cursor over
+            # sqlite_master while issuing DROP INDEX on the SAME connection
+            # leaves the schema locked ("database table is locked"), which
+            # crashed startup on every restart until the index was gone.
+            existing = self._conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (tbl,)).fetchall()
+            for row in existing:
+                name, sql = row[0], row[1].upper()
+                if not sql.startswith("CREATE UNIQUE"):
+                    continue                       # plain indexes are harmless
+                cols = {c.strip().strip("\"`").lower() for c in
+                        sql[sql.index("(") + 1:sql.rindex(")")].split(",")}
+                # Compare case-insensitively: sqlite_master echoes identifiers as
+                # written (often uppercased by the parser), so a case-sensitive
+                # match against ("owner","date") fails and would drop the GOOD
+                # owner-scoped index on every restart.
+                if cols >= set(want):
+                    continue                       # already owner-scoped: keep it
+                # Identifier comes from sqlite_master, not user input; quote it
+                # defensively anyway.
+                self._conn.execute('DROP INDEX IF EXISTS "%s"' % name.replace('"', ""))
+                print(f"[migrate] dropped legacy unique index {name} on {tbl}{cols}")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_meals_owner ON meals(owner, date)")
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_weights_owner_date ON weights(owner, date)")
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bf_owner_date ON body_fat(owner, date)")
