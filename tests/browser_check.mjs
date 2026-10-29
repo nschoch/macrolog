@@ -512,6 +512,57 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- 24-hour clock option --------------------------------------------
+  const clockFmt = await evalJson(`(async () => {
+    // Earlier sections navigate days; make sure we are looking at today or the
+    // seeded meal would not be rendered at all.
+    viewDate = '';
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    // Seed a meal so there is a time to render.
+    const today = todayISO();
+    await fetch('/api/meals', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: 'clock probe', calories: 100, protein: 5,
+        carbs: 10, fat: 4, date: today, time: '13:30', source: 'manual' }) });
+    await refresh();
+    const sample = () => {
+      const row = [...document.querySelectorAll('.meal-meta')].find(e => /clock probe/.test(
+        (e.closest('.meal') || {}).textContent || ''));
+      return { head: (document.querySelector('.group-meta') || {}).textContent || '',
+               meta: row ? row.textContent : '' };
+    };
+    const as12 = sample();
+    // Switch through the Settings UI, as a user would.
+    document.querySelector('button[data-view="settings"]').click();
+    document.getElementById('s-timefmt').value = '24h';
+    document.getElementById('btn-save').click();
+    await new Promise(r => setTimeout(r, 1800));
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    const as24 = sample();
+    const stored = (await fetch('/api/state').then(r => r.json())).settings.time_format;
+    // restore
+    document.querySelector('button[data-view="settings"]').click();
+    document.getElementById('s-timefmt').value = '12h';
+    document.getElementById('btn-save').click();
+    await new Promise(r => setTimeout(r, 1500));
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    const back = sample();
+    const meals = await fetch('/api/state').then(r => r.json());
+    for (const m of meals.meals.filter(x => x.description === 'clock probe'))
+      await fetch('/api/meals/' + m.id, { method: 'DELETE' });
+    return JSON.stringify({ as12, as24, back, stored });
+  })()`);
+  const cf = JSON.parse(clockFmt);
+  check('12-hour is the default and shows AM/PM',
+        /\d{1,2}:\d{2}\s?(AM|PM)/i.test(cf.as12.head + ' ' + cf.as12.meta), JSON.stringify(cf.as12));
+  check('24-hour option renders HH:MM without AM/PM',
+        /\b\d{2}:\d{2}\b/.test(cf.as24.head) && !/(AM|PM)/i.test(cf.as24.head), JSON.stringify(cf.as24));
+  check('time format persists on the server', cf.stored === '24h' || cf.stored === '12h', String(cf.stored));
+  check('switching back restores 12-hour display',
+        /(AM|PM)/i.test(cf.back.head + ' ' + cf.back.meta), JSON.stringify(cf.back));
+
   // ---- The browser must tell the server its own timezone ----------------
   const tzHeader = await evalJson(`(async () => {
     const seen = [];

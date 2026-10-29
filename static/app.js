@@ -285,7 +285,7 @@ function confColor(c) {
 }
 
 function mealRowHtml(m) {
-    const time = new Date(m.ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const time = fmtTime(m.ts);
     // A meal may carry several photos (plate + nutrition label); show them all.
     const pics = (m.photos && m.photos.length ? m.photos : (m.photo ? [m.photo] : []));
     const thumb = pics.length
@@ -320,6 +320,20 @@ function mealRowHtml(m) {
 // Grouped day view: server clusters records into eatings by time proximity, so
 // logging a second dish does not create a competing "meal" and the label comes
 // from when you ate rather than a dropdown you have to answer every time.
+// Clock-time rendering honours the per-user preference. Epochs are the storage
+// format, so switching format never rewrites data -- it is display only.
+function is24h() {
+  return (state?.settings?.time_format || '12h') === '24h';
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  if (is24h()) {
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
 function renderGroups(groups, meals) {
   const host = $('meal-groups');
   const byId = Object.fromEntries((meals || []).map(m => [m.id, m]));
@@ -327,8 +341,7 @@ function renderGroups(groups, meals) {
   if (!groups || !groups.length) { host.innerHTML = ''; return; }
   host.innerHTML = groups.map(g => {
     const rows = g.meal_ids.map(id => byId[id]).filter(Boolean).map(mealRowHtml).join('');
-    const t = new Date(g.start_ts * 1000)
-      .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const t = fmtTime(g.start_ts);
     const extra = g.count > 1 ? ` · ${g.count} items` : '';
     return `<section class="meal-group">
       <header class="group-head">
@@ -1144,6 +1157,7 @@ function renderSettings() {
   const s = state.settings || {};
   const imp = U.imperial;
   $('s-units').value = imp ? 'imperial' : 'metric';
+  if ($('s-timefmt')) $('s-timefmt').value = s.time_format === '24h' ? '24h' : '12h';
   $('s-sex').value = s.sex || 'male';
   $('s-age').value = s.age ?? 35;
 
@@ -1289,6 +1303,7 @@ $('btn-save').addEventListener('click', async () => {
     fat_calorie_pct: Number($('s-fatpct').value),
     auto_adapt: $('s-autoadapt').checked,
     calibrate_estimates: $('s-calibrate').checked,
+    time_format: $('s-timefmt') ? $('s-timefmt').value : undefined,
   };
   const tgt = Number($('s-target').value);
   if (tgt) payload.calorie_target = tgt;

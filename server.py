@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "starting_weight_kg": None,
     "auto_adapt": True,
     "calibrate_estimates": True,
+    "time_format": "12h",            # 12h | 24h (display only; storage is epochs)
     "meal_gap_minutes": 45,          # meals logged within this gap = one sitting
     # Provider chain, tried in order. First entry wins; missing keys are skipped.
     "providers": [
@@ -97,7 +98,7 @@ USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
                      "calorie_target", "start_date", "starting_weight_kg",
                      "auto_adapt", "calibrate_estimates", "_profile_set",
-                     "meal_gap_minutes"}
+                     "meal_gap_minutes", "time_format"}
 
 
 def get_settings(owner: str = "default") -> dict:

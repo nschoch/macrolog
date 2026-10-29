@@ -523,6 +523,21 @@ for mid, _ in made:
     if mid:
         req_tz(f"/api/meals/{mid}", "DELETE")
 
+# 28. time_format is a per-user display preference
+st, tf = req("/api/settings", "PUT", {"time_format": "24h"})
+check("time_format saves", st == 200 and (tf.get("settings") or {}).get("time_format") == "24h",
+      str((tf.get("settings") or {}).get("time_format")))
+st, sd = req("/api/state")
+check("time_format persists across a fresh state read",
+      (sd.get("settings") or {}).get("time_format") == "24h",
+      str((sd.get("settings") or {}).get("time_format")))
+# It is presentation only: no stored timestamp semantics change.
+check("time_format does not alter stored dates",
+      all(len(m["date"]) == 10 for m in sd.get("meals", [])), "date fields malformed")
+st, tf = req("/api/settings", "PUT", {"time_format": "12h"})
+check("time_format switches back", (tf.get("settings") or {}).get("time_format") == "12h",
+      str((tf.get("settings") or {}).get("time_format")))
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))
