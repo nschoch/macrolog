@@ -352,23 +352,52 @@ function nowHM() { const d = new Date(); return `${String(d.getHours()).padStart
 function todayISO() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 
 // Recompute a component's macros from grams, preserving per-gram density.
+// ---------------------------------------------------------- auto vs manual
+// Default is AUTO: grams is the single input and kcal/P/C/F are derived from the
+// item's per-gram density, so any portion change always updates the macros.
+// MANUAL hands the macro fields to the user, for cases where the numbers come
+// from a printed label and must not be scaled by an estimated weight.
+//
+// Density is anchored once (_unit = macros per gram) rather than recomputed from
+// rounded values on every keystroke -- otherwise repeated edits drift.
+function densityOf(it) {
+  if (!(+it.grams > 0)) return null;
+  const g = +it.grams;
+  return { calories: (+it.calories || 0) / g, protein: (+it.protein || 0) / g,
+           carbs: (+it.carbs || 0) / g, fat: (+it.fat || 0) / g };
+}
+
+function ensureDensity(it) {
+  if (it._unit) return it._unit;
+  const d = densityOf(it);
+  if (d) it._unit = d;
+  return it._unit || null;
+}
+
+function isManual(it) { return it._manual === true; }
+
+function applyDensity(it, grams) {
+  it.grams = grams;
+  const u = it._unit;
+  if (!u || !(grams >= 0)) return it;
+  it.calories = +(u.calories * grams).toFixed(1);
+  it.protein = +(u.protein * grams).toFixed(1);
+  it.carbs = +(u.carbs * grams).toFixed(1);
+  it.fat = +(u.fat * grams).toFixed(1);
+  return it;
+}
+
+// Portion change. Auto rows recompute macros from density; manual rows only
+// record the weight (the user owns those numbers).
 function rescaleItem(it, newGrams) {
-  // Scale macros by the change in portion, preserving per-gram density so the
-  // edit is reversible (200g -> 100g returns the original numbers).
-  if (!it.grams || it.grams <= 0) {
-    // No baseline weight to derive density from -- e.g. a text-described item
-    // where the model gave macros but no grams. Record what the user typed and
-    // leave the macros alone rather than silently doing nothing.
+  if (isManual(it)) { it.grams = newGrams; return it; }
+  if (!(+it.grams > 0)) {
+    // No baseline weight: nothing to derive from (e.g. a model that returned
+    // macros but no grams). Record the weight; the hint explains the rest.
     it.grams = newGrams;
     return it;
   }
-  if (newGrams === it.grams) return it;
-  const k = newGrams / it.grams;
-  it.grams = newGrams;
-  it.calories = +(it.calories * k).toFixed(1);
-  it.protein = +(it.protein * k).toFixed(1);
-  it.carbs = +(it.carbs * k).toFixed(1);
-  it.fat = +(it.fat * k).toFixed(1);
+  applyDensity(it, newGrams);
   return it;
 }
 
@@ -393,26 +422,60 @@ function refreshTotals() {
   $('r-totals-wrap').style.display = hasComps ? 'block' : 'none';
 
   // Explain the asterisk on the g label: with no starting weight there is no
-  // per-gram density to scale by, so a grams edit cannot adjust macros. Evaluated
-  // last so it tracks the value the user just typed rather than the stale one.
+  // per-gram density to scale by. Evaluated last so it tracks the typed value.
   const hint = $('r-scale-hint');
   if (hint) {
+    // Show it for ANY row without a weight, regardless of mode: with grams=0
+    // there is no density, so scaling cannot work until one is supplied.
     const needsHint = compItems.some(i => !(+i.grams > 0));
     hint.hidden = !needsHint || !hasComps;
-    if (!hint.hidden) hint.textContent = '* this item has no portion weight to scale from \u2014 set its calories/macros directly, or give it a weight first.';
+    if (!hint.hidden) hint.textContent = '* no portion weight yet \u2014 enter grams to scale automatically, or edit the macros directly.';
   }
+  syncDescGrams();
 }
 
-// Push an item's recomputed macros into its existing row inputs. The focused
-// element is skipped deliberately -- rewriting value on the field being typed
-// into resets the caret even without a full re-render.
+// The description is a label, not a portion input, so typing "10g of nuts" there
+// cannot rescale macros on its own. Rather than silently ignoring it, offer a
+// one-tap apply whenever a single item's weight disagrees with the text.
+function descGrams() {
+  const t = $('r-desc') ? $('r-desc').value : '';
+  const m = t.match(/(\d+(?:[.,]\d+)?)\s*(?:g|grams?)\b/i);
+  return m ? parseFloat(m[1].replace(',', '.')) : null;
+}
+
+function syncDescGrams() {
+  const btn = $('btn-apply-desc-grams');
+  if (!btn) return;
+  const want = descGrams();
+  if (want == null || !(want > 0) || compItems.length !== 1) { btn.hidden = true; return; }
+  const cur = +compItems[0].grams || 0;
+  if (Math.abs(want - cur) < 0.05) { btn.hidden = true; return; }
+  btn.hidden = false;
+  btn.dataset.grams = String(want);
+  btn.textContent = `Use ${want} g from description`;
+}
+
+$('r-desc').addEventListener('input', syncDescGrams);
+$('btn-apply-desc-grams').addEventListener('click', () => {
+  const want = Number($('btn-apply-desc-grams').dataset.grams);
+  if (!(want > 0) || compItems.length !== 1) return;
+  const it = compItems[0];
+  if (!isManual(it) && !it._unit) { const d = densityOf(it); if (d) it._unit = d; }
+  rescaleItem(it, want);
+  renderCompEditor();
+  toast(`Portion set to ${want} g`);
+});
+
+// Write an item's recomputed macros into its EXISTING row inputs. The focused
+// element is skipped deliberately: assigning .value to the field being typed in
+// resets the caret even without a full re-render (and drops the iOS keyboard).
 function syncRowFromItem(row, it) {
   for (const inp of row.querySelectorAll('input[data-f]')) {
     const f = inp.dataset.f;
+    if (f === 'grams' || f === 'name') continue;   // never touch what's typed
     if (inp === document.activeElement) continue;
-    const v = it[f];
     const shown = (f === 'protein' || f === 'fat' || f === 'carbs')
-      ? String(+(+v).toFixed(1)) : String(Math.round(+v || 0));
+      ? String(+(+it[f]).toFixed(1)) : String(Math.round(+it[f] || 0));
     if (inp.value !== shown) inp.value = shown;
   }
 }
@@ -420,22 +483,31 @@ function syncRowFromItem(row, it) {
 function renderCompEditor() {
   const wrap = $('r-items');
   if (!compItems.length) { wrap.innerHTML = ''; refreshTotals(); return; }
-  wrap.innerHTML = compItems.map((it, idx) => `
+  wrap.innerHTML = compItems.map((it, idx) => {
+    const manual = isManual(it);
+    const ro = manual ? '' : 'readonly';
+    const weightKnown = +it.grams > 0;
+    return `
     <div class="item-row" data-i="${idx}">
       <div class="ir-top">
         <input class="ir-name" value="${esc(it.name)}" placeholder="food" data-f="name">
+        <button class="ir-mode ${manual ? 'on' : ''}" data-mode="${idx}"
+          title="${manual ? 'Macros are yours to edit; grams does not rescale them'
+                          : 'Macros are calculated from grams — tap to edit them yourself'}">
+          ${manual ? 'manual' : 'auto'}</button>
         <button class="ir-del" title="Remove" data-del="${idx}">×</button>
       </div>
       <div class="ir-grid">
-        <div class="ir-cell"><label>g${(+it.grams > 0) ? '' : ' *'}</label><input type="number" inputmode="numeric" value="${+it.grams||''}" data-f="grams"></div>
-        <div class="ir-cell"><label>kcal</label><input type="number" inputmode="numeric" value="${Math.round(it.calories)||''}" data-f="calories"></div>
-        <div class="ir-cell"><label>P g</label><input type="number" inputmode="numeric" value="${(+it.protein).toFixed(1)}" data-f="protein"></div>
-        <div class="ir-cell"><label>C g</label><input type="number" inputmode="numeric" value="${(+it.carbs).toFixed(1)}" data-f="carbs"></div>
+        <div class="ir-cell"><label>g${weightKnown || manual ? '' : ' *'}</label><input type="number" inputmode="numeric" value="${+it.grams || ''}" data-f="grams"></div>
+        <div class="ir-cell"><label>kcal</label><input type="number" inputmode="numeric" value="${Math.round(it.calories) || ''}" data-f="calories" ${ro}></div>
+        <div class="ir-cell"><label>P g</label><input type="number" inputmode="numeric" value="${(+it.protein).toFixed(1)}" data-f="protein" ${ro}></div>
+        <div class="ir-cell"><label>C g</label><input type="number" inputmode="numeric" value="${(+it.carbs).toFixed(1)}" data-f="carbs" ${ro}></div>
       </div>
       <div class="ir-grid" style="grid-template-columns:1fr 1fr">
-        <div class="ir-cell"><label>F g</label><input type="number" inputmode="numeric" value="${(+it.fat).toFixed(1)}" data-f="fat"></div>
+        <div class="ir-cell"><label>F g</label><input type="number" inputmode="numeric" value="${(+it.fat).toFixed(1)}" data-f="fat" ${ro}></div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   refreshTotals();
 }
 
@@ -445,7 +517,15 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   // 'photo' covers camera shots; typed descriptions have no image.
   $('review-sheet').dataset.source = previewUrl || photoUrl ? 'photo' : 'text';
   $('r-desc').value = e.description || '';
-  compItems = (e.items || []).map(i => ({ ...i }));
+  compItems = (e.items || []).map(i => {
+    const copy = { ...i };
+    // Anchor density from the estimate so later gram edits scale exactly rather
+    // than compounding rounding. No weight -> cannot derive, so start that row in
+    // manual mode (the macro fields are editable straight away).
+    if (+copy.grams > 0) copy._unit = densityOf(copy);
+    else copy._manual = true;
+    return copy;
+  });
   // Manual totals as fallback when there are no components.
   $('r-cal').value = Math.round(e.calories || 0);
   $('r-pro').value = Math.round(e.protein || 0);
@@ -486,25 +566,55 @@ $('r-items').addEventListener('input', (ev) => {
   const row = ev.target.closest('.item-row'); if (!row) return;
   const idx = +row.dataset.i, f = ev.target.dataset.f, raw = ev.target.value;
   const it = compItems[idx]; if (!it) return;
-  if (f === 'name') { compItems[idx].name = raw; return; }
+  if (f === 'name') { it.name = raw; return; }
   const val = Number(raw) || 0;
   if (f === 'grams') {
-    rescaleItem(compItems[idx], val);
-    // Do NOT re-render the editor here: replacing innerHTML destroys the very
-    // input being typed into, so the caret jumped to the start on every keystroke
-    // and iOS dismissed the keyboard. Update the sibling fields in place instead;
-    // only structural changes (add/remove item) warrant a full rebuild.
+    rescaleItem(it, val);
+    // Never re-render here: replacing innerHTML destroys the input being typed
+    // into, resetting the caret and dismissing the iOS keyboard.
     syncRowFromItem(row, it);
     refreshTotals();
     return;
   }
-  compItems[idx][f] = val;
-  refreshTotals();
+  if (isManual(it)) {
+    it[f] = val;
+    // A manual edit re-anchors density from what is on screen, so flipping back
+    // to auto scales from the numbers the user just confirmed.
+    if (+it.grams > 0) {
+      const d = densityOf(it);
+      if (d) it._unit = d;
+    }
+    refreshTotals();
+  }
+  // Auto rows keep their macro inputs readonly, so this branch is unreachable
+  // there; nothing to do if an event still arrives.
 });
+
 $('r-items').addEventListener('click', (ev) => {
+  const mode = ev.target.closest('[data-mode]');
+  if (mode) {
+    const it = compItems[+mode.dataset.mode]; if (!it) return;
+    if (isManual(it)) {
+      // manual -> auto: re-derive from the values on screen so nothing jumps.
+      if (!(+it.grams > 0)) {
+        toast('Give it a weight first, then macros can be calculated', true);
+        return;
+      }
+      const d = densityOf(it);
+      if (d) it._unit = d;
+      it._manual = false;
+      toast('Macros now follow grams');
+    } else {
+      it._manual = true;      // auto -> manual: keep current numbers as the base
+      toast('Macros are yours to edit now');
+    }
+    renderCompEditor();
+    return;
+  }
   const del = ev.target.closest('[data-del]'); if (!del) return;
   compItems.splice(+del.dataset.del, 1); renderCompEditor();
 });
+
 $('btn-add-item').addEventListener('click', () => {
   compItems.push({ name: '', grams: 0, calories: 0, protein: 0, carbs: 0, fat: 0 });
   renderCompEditor();
@@ -526,7 +636,10 @@ $('review-sheet').addEventListener('click', (e) => { if (e.target.id === 'review
 
 $('btn-save-review').addEventListener('click', async () => {
   const hasComps = compItems.length > 0;
-  const cleanComps = compItems.filter(i => (i.name || +i.grams || +i.calories));
+  const cleanComps = compItems
+    .filter(i => (i.name || +i.grams || +i.calories))
+    // _unit/_manual are view state; the server only stores real nutrition fields.
+    .map(({ _unit, _manual, _status, ...rest }) => rest);
   const payload = {
     description: $('r-desc').value.trim(),
     kind: $('r-kind').value,

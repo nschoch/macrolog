@@ -125,6 +125,18 @@ input, select, button { font: inherit; color: inherit; }
 
 .scale-hint { font-size: 12px; color: #fcd34d; margin: 6px 0 8px; }
 
+/* ------------------------------------------------ item auto/manual macros */
+.ir-mode { border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
+  border-radius: 999px; font-size: 10px; line-height: 1; padding: 4px 8px;
+  text-transform: uppercase; letter-spacing: .05em; }
+.ir-mode.on { color: #fcd34d; border-color: #6b5320; }
+.item-row input[data-f="calories"][readonly],
+.item-row input[data-f="protein"][readonly],
+.item-row input[data-f="carbs"][readonly],
+.item-row input[data-f="fat"][readonly] { color: var(--muted); background: transparent;
+  border-style: dashed; cursor: not-allowed; }
+.ir-top { align-items: center; }
+
 /* ------------------------------------------------------------- day nav */
 .day-nav { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 4px 0 2px; }
 .day-nav h2 { font-size: 15px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); min-width: 132px; text-align: center; }

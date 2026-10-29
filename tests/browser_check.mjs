@@ -539,26 +539,121 @@ try {
         JSON.stringify(sc.reverted) === JSON.stringify([100, 130]), scale);
   await evalJson(`closeSheets()`);
 
-  // An item with no starting weight cannot scale -- it must say so rather than
-  // appear to ignore the edit.
+  // An item with no starting weight has no density to scale by: it must start in
+  // manual mode (macros editable) and say why, rather than silently ignoring edits.
   const zg = await evalJson(`(() => {
     openReview({ estimate: { description: 'x', calories: 250, protein: 12.5, carbs: 28,
                              fat: 11, items: [{ name: 'mystery', grams: 0, calories: 250,
                              protein: 12.5, carbs: 28, fat: 11 }] } });
     const hintEl = document.getElementById('r-scale-hint');
-    const label = document.querySelector('.item-row[data-i="0"] .ir-cell label').textContent;
-    const before = !hintEl.hidden;
+    const before = { hinted: !hintEl.hidden,
+                     mode: document.querySelector('[data-mode="0"]').textContent.trim(),
+                     kcalReadonly: document.querySelector('.item-row[data-i="0"] input[data-f="calories"]').readOnly };
     const g = document.querySelector('.item-row[data-i="0"] input[data-f="grams"]');
     g.value = '150'; g.dispatchEvent(new Event('input', { bubbles: true }));
-    return JSON.stringify({ hinted: before, label, grams: compItems[0].grams,
-                            kcalKept: compItems[0].calories,
-                            hintClearedAfterWeight: !hintEl.hidden });
+    return JSON.stringify({ before, grams: compItems[0].grams,
+                            kcalKept: compItems[0].calories });
   })()`);
   const z = JSON.parse(zg);
-  check('zero-weight item flags that it cannot scale', z.hinted === true && z.label.includes('*'), zg);
+  check('zero-weight item starts in manual mode with editable macros',
+        z.before.mode === 'manual' && z.before.kcalReadonly === false, zg);
+  check('zero-weight item explains why it cannot scale', z.before.hinted === true, zg);
   check('zero-weight item records grams without inventing macros',
         z.grams === 150 && z.kcalKept === 250, zg);
-  check('hint clears once a weight exists', z.hintClearedAfterWeight === false, zg);
+  await evalJson(`closeSheets()`);
+
+  // ---- Automatic macro calculation (default) + manual override -----------
+  const auto = await evalJson(`(() => {
+    openReview({ estimate: { description: '8g of brazil nuts', calories: 52, protein: 1.1,
+                             carbs: 1, fat: 5.3, items: [{ name: 'Brazil nuts', grams: 8,
+                             calories: 52, protein: 1.1, carbs: 1, fat: 5.3 }] } });
+    const rowSel = '.item-row[data-i="0"]';
+    const out = {
+      mode: document.querySelector('[data-mode="0"]').textContent.trim(),
+      macrosReadOnly: document.querySelector(rowSel + ' input[data-f="calories"]').readOnly,
+    };
+    const g = document.querySelector(rowSel + ' input[data-f="grams"]');
+    g.value = '10'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    out.after10 = { grams: compItems[0].grams, kcal: compItems[0].calories,
+                    p: compItems[0].protein, c: compItems[0].carbs, f: compItems[0].fat,
+                    shownKcal: document.querySelector(rowSel + ' input[data-f="calories"]').value,
+                    totals: document.getElementById('r-total-shown').textContent.trim() };
+    // manual mode: macros become editable and grams stops rescaling them
+    document.querySelector('[data-mode="0"]').click();
+    const kc = document.querySelector(rowSel + ' input[data-f="calories"]');
+    out.manualEditable = !kc.readOnly;
+    kc.value = '150'; kc.dispatchEvent(new Event('input', { bubbles: true }));
+    const g2 = document.querySelector(rowSel + ' input[data-f="grams"]');
+    g2.value = '20'; g2.dispatchEvent(new Event('input', { bubbles: true }));
+    out.manualAfter = { kcal: compItems[0].calories, grams: compItems[0].grams,
+                        mode: document.querySelector('[data-mode="0"]').textContent.trim() };
+    return JSON.stringify(out);
+  })()`);
+  const au = JSON.parse(auto);
+  check('macros are read-only in auto mode (grams is the input)',
+        au.mode === 'auto' && au.macrosReadOnly === true, auto);
+  check('editing grams recalculates macros to the new portion',
+        Math.round(au.after10.kcal) === 65 && au.after10.shownKcal === '65'
+        && au.after10.grams === 10, auto);
+  check('recalculated macros reach the rendered row and totals',
+        au.after10.p === 1.4 && /65 kcal/.test(au.after10.totals), auto);
+  check('manual mode unlocks the macro fields', au.manualEditable === true, auto);
+  check('manual macros are not overwritten by a gram change',
+        au.manualAfter.kcal === 150 && au.manualAfter.grams === 20
+        && au.manualAfter.mode === 'manual', auto);
+  await evalJson(`closeSheets()`);
+
+  // ---- Description naming a different portion offers a one-tap apply ----
+  const desc = await evalJson(`(() => {
+    openReview({ estimate: { description: 'brazil nuts', calories: 52, protein: 1.1,
+                             carbs: 1, fat: 5.3, items: [{ name: 'Brazil nuts', grams: 8,
+                             calories: 52, protein: 1.1, carbs: 1, fat: 5.3 }] } });
+    const btn = document.getElementById('btn-apply-desc-grams');
+    const hiddenAtOpen = btn.hidden;
+    const d = document.getElementById('r-desc');
+    d.value = '10g of brazil nuts'; d.dispatchEvent(new Event('input', { bubbles: true }));
+    const offered = { hidden: btn.hidden, label: btn.textContent };
+    btn.click();
+    return JSON.stringify({ hiddenAtOpen, offered, grams: compItems[0].grams,
+                            kcal: compItems[0].calories,
+                            hiddenAfter: document.getElementById('btn-apply-desc-grams').hidden });
+  })()`);
+  const de = JSON.parse(desc);
+  check('description portion mismatch is surfaced, not ignored',
+        de.hiddenAtOpen === true && de.offered.hidden === false
+        && /10\s*g/.test(de.offered.label), desc);
+  check('applying the described portion rescales macros',
+        de.grams === 10 && Math.round(de.kcal) === 65 && de.hiddenAfter === true, desc);
+  await evalJson(`closeSheets()`);
+
+  // ---- Scaled values survive save and reopen in auto mode ----------------
+  const round = await evalJson(`(async () => {
+    openReview({ estimate: { description: 'auto save probe', calories: 52, protein: 1.1,
+                             carbs: 1, fat: 5.3, items: [{ name: 'Brazil nuts', grams: 8,
+                             calories: 52, protein: 1.1, carbs: 1, fat: 5.3 }] } });
+    const g = document.querySelector('.item-row[data-i="0"] input[data-f="grams"]');
+    g.value = '10'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    // The sheet stamps whichever day is being viewed, which may not be today
+    // after the day-nav checks -- query the date it will actually save under.
+    const saveDate = document.getElementById('r-date').value || todayISO();
+    document.getElementById('btn-save-review').click();
+    await new Promise(r => setTimeout(r, 3000));
+    const st = await fetch('/api/state?date=' + encodeURIComponent(saveDate)).then(r => r.json());
+    const m = st.meals.find(x => x.description === 'auto save probe');
+    const saved = m ? { kcal: m.calories, item: (m.items || [])[0] } : null;
+    let reopen = null;
+    if (m) { closeSheets(); openReview({ estimate: m, editingId: m.id });
+      reopen = { mode: document.querySelector('[data-mode="0"]').textContent.trim(),
+                 grams: document.querySelector('.item-row[data-i="0"] input[data-f="grams"]').value }; }
+    if (m) await fetch('/api/meals/' + m.id, { method: 'DELETE' });
+    return JSON.stringify({ saved, reopen });
+  })()`);
+  const rt = JSON.parse(round);
+  check('scaled portion persists after save',
+        rt.saved && rt.saved.kcal === 65 && rt.saved.item.grams === 10
+        && rt.saved.item.calories === 65, round);
+  check('reopening a saved meal returns to auto mode at the saved weight',
+        rt.reopen && rt.reopen.mode === 'auto' && rt.reopen.grams === '10', round);
   await evalJson(`closeSheets()`);
 
   // ---- Provider editor (LOCAL ONLY) -------------------------------------

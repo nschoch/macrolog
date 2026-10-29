@@ -196,6 +196,10 @@
     <img id="review-img" alt="your meal" class="review-img">
     <div class="photo-actions"><button class="ghost tiny" id="btn-recrop">Choose different photo</button></div>
     <label class="fld">Description<input id="r-desc" type="text" placeholder="what did you eat?"></label>
+    <!-- Description is a label, not a portion input. If it names a gram amount
+         that disagrees with the item weight, offer a one-tap apply instead of
+         silently ignoring the text (which looked like macros were stuck). -->
+    <button class="ghost tiny" id="btn-apply-desc-grams" hidden></button>
     <div class="grid2">
       <label class="fld">Date<input id="r-date" type="date"></label>
       <label class="fld">Time<input id="r-time" type="time"></label>
