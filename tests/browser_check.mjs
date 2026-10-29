@@ -11,9 +11,12 @@ import { join } from 'node:path';
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8790/';
 const COOKIE = process.argv[3] || '';
-// NOTE: run this against its OWN server instance (its own MACROLOG_DATA dir).
-// It writes meals and weights, which would otherwise perturb api_test's
-// consumed/trend assertions if both suites shared a database.
+// IMPORTANT: give this suite its OWN server + MACROLOG_DATA directory. It
+// writes meals and weights, which perturb api_test's consumed/trend assertions
+// when both share one database (api_test then fails for reasons unrelated to
+// the code under test). Suggested invocation:
+//   MACROLOG_DATA=$(mktemp -d) python3 server.py --port 8790 --no-browser &
+//   node tests/browser_check.mjs http://127.0.0.1:8790/
 // Optional: route the real hostname to a local port-forward (e.g. an SSH
 // tunnel) so headless Chrome can reach deployments that its network stack
 // cannot touch directly. TLS is still validated against the REAL hostname.
@@ -286,15 +289,20 @@ try {
     return m ? m.id : null;
   })()`);
 
-  // Pin the offline stub provider before any estimate call: hitting the live
-  // model costs 60-200s per call and is flaky, which made these checks slow and
-  // nondeterministic. api_test does the same; tests must not depend on an
-  // external API. Placed after the settings assertions because PUT merges into
-  // the same row and would otherwise persist state across runs.
-  const pinned = await evalJson(`fetch('/api/settings', { method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ providers: [{ kind: 'stub' }] }) }).then(r => r.status)`);
-  if (pinned !== 200) console.log('[harness] warning: could not pin stub provider (' + pinned + ')');
+  // Pin the offline stub provider so estimate calls don't hit the live model
+  // (60-200s when healthy, flaky otherwise). LOCAL TARGETS ONLY: `providers`
+  // lives in the SHARED settings blob, so pinning against production silently
+  // replaced the household's real vision chain with the stub -- twice. On a
+  // remote target we accept slow estimates rather than corrupting config.
+  const isLocalTarget = /^https?:\/\/(127\.|localhost|\[::1\])/.test(BASE);
+  if (isLocalTarget) {
+    const pinned = await evalJson(`fetch('/api/settings', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providers: [{ kind: 'stub' }] }) }).then(r => r.status)`);
+    if (pinned !== 200) console.log('[harness] warning: could not pin stub provider (' + pinned + ')');
+  } else {
+    console.log('[harness] remote target: not touching shared provider config');
+  }
 
   // ---- Unified Add-meal sheet: photos + text composed into one estimate ----
   await evalJson(`(() => { document.querySelector('button[data-view="today"]').click();
@@ -323,7 +331,13 @@ try {
 
   await evalJson(`document.getElementById('a-text').value = 'about half the box of pasta'`);
   await evalJson(`document.getElementById('btn-estimate-meal').click()`);
-  await sleep(4000); await watchdog(); drain();
+  // Remote targets hit the real model (can take minutes); poll for the spinner
+  // to clear rather than sleeping a fixed amount that races later sections.
+  for (let i = 0; i < 60; i++) {
+    await sleep(1000);
+    if (await evalJson(`document.getElementById('loading').hidden`)) break;
+  }
+  await watchdog(); drain();
   check('multi-input estimate produced no JS error', jsErrors.length === errsD,
         jsErrors.slice(errsD).join(' | ').slice(0, 300));
 
@@ -503,7 +517,6 @@ try {
   // across all users -- running it against production would replace the real
   // vision chain with the offline stub (it did once). Skip unless the target
   // looks local or ML_ALLOW_PROVIDER_EDITS=1 says otherwise.
-  const isLocalTarget = /^https?:\/\/(127\.|localhost|\[::1\])/.test(BASE);
   const mayEditProviders = isLocalTarget || process.env.ML_ALLOW_PROVIDER_EDITS === '1';
   if (!mayEditProviders) console.log('[harness] skipping provider-editor checks (shared config; set ML_ALLOW_PROVIDER_EDITS=1 to force)');
   if (mayEditProviders) {
