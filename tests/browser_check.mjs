@@ -498,7 +498,15 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
-  // ---- Provider editor: reorder keeps each model attached to its provider,
+  // ---- Provider editor (LOCAL ONLY) -------------------------------------
+  // This section PUTs /api/settings {providers}, and providers are SHARED
+  // across all users -- running it against production would replace the real
+  // vision chain with the offline stub (it did once). Skip unless the target
+  // looks local or ML_ALLOW_PROVIDER_EDITS=1 says otherwise.
+  const isLocalTarget = /^https?:\/\/(127\.|localhost|\[::1\])/.test(BASE);
+  const mayEditProviders = isLocalTarget || process.env.ML_ALLOW_PROVIDER_EDITS === '1';
+  if (!mayEditProviders) console.log('[harness] skipping provider-editor checks (shared config; set ML_ALLOW_PROVIDER_EDITS=1 to force)');
+  if (mayEditProviders) {
   // edits target the visible row, disabled entries stop being used. ----
   await evalJson(`(() => { document.querySelector('button[data-view="settings"]').click(); })()`);
   await sleep(500);
@@ -534,6 +542,7 @@ try {
   check('editing targets the visible row', po.firstKind === 'stub' && po.afterEdit[0][1] === 'EDITED', prov);
   check('provider edits persist to the server',
         Array.isArray(po.saved) && po.saved.length === 3 && po.saved[0][2] === false, prov);
+  }
 
   // ---- Trend view must actually paint (regression: prepCanvas returned `h`
   // while callers destructured `hh`, leaving every y-coordinate NaN so both

@@ -1028,6 +1028,10 @@ $('provider-list').addEventListener('change', (e) => {
 // Editing starts on demand: the list is read-only until "Edit" is pressed so an
 // accidental tap can't reorder the chain that decides which model answers.
 $('btn-edit-providers')?.addEventListener('click', () => {
+  // Providers are stored in the SHARED settings blob, not per person: changing
+  // the chain here changes it for every family member. Say so once, before the
+  // first edit, because "my estimates stopped working" is otherwise baffling.
+  if (!provDraft) toast('Providers are shared by everyone using this server');
   provDraft = JSON.parse(JSON.stringify(state.settings.providers || []));
   renderProviders();
   $('btn-save-providers').hidden = false;
