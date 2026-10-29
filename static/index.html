@@ -218,7 +218,12 @@
 
     <div class="section-head sub">
       <span>Components</span>
-      <button class="ghost tiny" id="btn-add-item">+ Add item</button>
+      <span class="head-btns">
+        <!-- Re-run the model over the photo(s) we already have. Shown only when
+             there is an image to rescan (hidden for text-only entries). -->
+        <button class="ghost tiny" id="btn-rescan" hidden>↻ Rescan photo</button>
+        <button class="ghost tiny" id="btn-add-item">+ Add item</button>
+      </span>
     </div>
     <div class="item-editor" id="r-items"></div>
     <p class="hint" id="r-nocomp-hint" hidden>No breakdown detected — edit totals directly below.</p>

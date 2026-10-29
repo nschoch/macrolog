@@ -331,6 +331,40 @@ class Api:
         return 200, out
 
     @staticmethod
+    def POST_rescan(h, q, body):
+        """Re-estimate from photos we already hold (temp uploads or saved meals).
+
+        Lets the user retry an estimate without re-photographing -- useful after
+        a poor read, a provider change, or when label/notes context is added
+        later. Writes nothing; the client decides whether to keep the result.
+        """
+        owner = getattr(h, "owner", "default")
+        names = [str(x) for x in (body.get("photos") or [])][:4]
+        paths = [p for p in (_resolve_photo(n) for n in names) if p]
+        if not paths:
+            return 400, {"error": "no photo available to rescan"}
+        text = str(body.get("text") or "").strip()[:2000]
+        try:
+            meal, provider, model = estimate_meal(paths, text or None,
+                                                  get_settings(owner))
+        except ProviderError as e:
+            return 502, {"error": f"all providers failed: {e}"}
+        except Exception as e:  # noqa: BLE001
+            return 500, {"error": f"{type(e).__name__}: {e}"}
+        if not meal["items"] and not meal["calories"]:
+            return 422, {"error": meal.get("notes") or "no food recognized in image"}
+        cur = get_settings(owner)
+        changed = False
+        if cur.get("calibrate_estimates"):
+            meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
+        out = {"estimate": meal, "provider": provider, "model": model,
+               "calibrated": changed, "photos": names}
+        errs = meal.get("_provider_errors")
+        if errs:
+            out["warning"] = _provider_warning(errs)
+        return 200, out
+
+    @staticmethod
     def POST_estimate_text(h, q, body):
         """Text -> AI estimate for described meals. Preview only; nothing is
         written until the client posts /meals with the returned estimate."""
@@ -879,6 +913,29 @@ def group_meals(meals: list[dict], gap_minutes: int = 45, tz=None) -> list[dict]
     return out
 
 
+def _resolve_photo(name) -> str | None:
+    """Find a stored/temp photo by basename, guarding against traversal.
+
+    Photos live either directly in PHOTO_DIR (temp uploads) or in a dated
+    subdirectory (saved meals), so a basename lookup has to search both.
+    """
+    safe = os.path.basename(str(name or ""))
+    if not safe or safe in (".", ".."):
+        return None
+    candidates = [os.path.join(PHOTO_DIR, safe)]
+    try:
+        for entry in os.listdir(PHOTO_DIR):
+            sub = os.path.join(PHOTO_DIR, entry)
+            if os.path.isdir(sub):
+                candidates.append(os.path.join(sub, safe))
+    except OSError:
+        pass
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _photo_list(stored) -> list[str]:
     """Meals store one path or a JSON list of them (plate + label photo);
     always return basenames in order."""
@@ -1200,6 +1257,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.POST_estimate_text(self, q, body)
             elif resource == "estimate-meal" and verb == "POST":
                 st, pl = Api.POST_estimate_meal(self, q, body)
+            elif resource == "rescan" and verb == "POST":
+                st, pl = Api.POST_rescan(self, q, body)
             elif resource == "meals" and verb == "POST":
                 st, pl = Api.POST_meals(self, q, body)
             elif resource == "meals" and tail and verb == "GET":

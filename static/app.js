@@ -5,6 +5,9 @@ const $ = (id) => document.getElementById(id);
 const CIRC = 2 * Math.PI * 86;
 let state = null;
 let pendingPhoto = null;   // { temp_photo, dataUrl }
+// Server-side image references for the meal currently under review (temp upload
+// paths or saved-meal basenames), so "Rescan" can re-run the model unchanged.
+let reviewPhotos = [];
 // Which day the Today view is showing. '' = today (server default).
 // All writes (meals, weights) stamp this date while browsing a past day.
 let viewDate = '';   // '' = today, else YYYY-MM-DD being browsed
@@ -581,7 +584,8 @@ function renderCompEditor() {
   refreshTotals();
 }
 
-function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl, editingId, warning }) {
+function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl,
+                      editingId, warning, photos }) {
   const e = estimate || {};
   $('review-sheet').dataset.editing = editingId || '';
   // 'photo' covers camera shots; typed descriptions have no image.
@@ -608,6 +612,14 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   $('r-time').value = editingId && e.ts ? `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}` : nowHM();
 
   const img = $('review-img');
+  // Prefer an explicit list (a rescan result), then saved-meal photos, then the
+  // temp uploads from this session.
+  reviewPhotos = (photos && photos.length) ? photos
+    : (estimate && estimate.photos && estimate.photos.length) ? estimate.photos
+    : (stagedForSave && stagedForSave.length) ? stagedForSave.slice()
+    : (pendingPhoto ? [pendingPhoto] : []);
+  if ($('btn-rescan')) $('btn-rescan').hidden = reviewPhotos.length === 0;
+
   const src = previewUrl || photoUrl;
   img.src = src || '';
   img.style.display = src ? 'block' : 'none';
@@ -700,6 +712,37 @@ $('r-items').addEventListener('click', (ev) => {
   }
   const del = ev.target.closest('[data-del]'); if (!del) return;
   compItems.splice(+del.dataset.del, 1); renderCompEditor();
+});
+
+// Re-scan the SAME image(s) with the configured model: useful after a poor read,
+// a provider/model change, or once notes have been added that clarify the plate.
+$('btn-rescan').addEventListener('click', async () => {
+  if (!reviewPhotos.length) { toast('No photo to rescan', true); return; }
+  const keep = { date: $('r-date').value, time: $('r-time').value,
+                 kind: $('r-kind').value, editing: $('review-sheet').dataset.editing,
+                 preview: $('review-img').src || null };
+  loading(true, 'Re-scanning photo…');
+  try {
+    const data = await api('rescan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photos: reviewPhotos, text: $('r-desc').value.trim() }),
+    });
+    if (data.warning) toast(data.warning, true);
+    openReview(Object.assign({}, data, {
+      photos: data.photos || reviewPhotos,
+      editingId: keep.editing || undefined,
+      previewUrl: keep.preview,
+    }));
+    // openReview re-derives these; put back whatever the user had chosen.
+    if (keep.date) $('r-date').value = keep.date;
+    if (keep.time) $('r-time').value = keep.time;
+    if (keep.kind) $('r-kind').value = keep.kind;
+    toast('Re-scanned — check the numbers');
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    loading(false);
+  }
 });
 
 $('btn-add-item').addEventListener('click', () => {

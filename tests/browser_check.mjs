@@ -512,6 +512,52 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- Rescan button: re-run the model on the same photo ----------------
+  const rescan = await evalJson(`(async () => {
+    viewDate = '';
+    document.querySelector('button[data-view="today"]').click();
+    // Build a photo-backed meal through the API, then open it for editing.
+    const jpg = new Uint8Array([255,216,255,224].concat(Array(700).fill(7)).concat([255,217]));
+    const fam = new FormData();
+    fam.append('photos', new Blob([jpg], { type: 'image/jpeg' }), 'probe.jpg');
+    const est = await fetch('/api/estimate-meal',
+      { method: 'POST', body: fam, headers: { 'X-Client-TZ': clientTz() } }).then(r => r.json());
+    const saved = await fetch('/api/meals', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Client-TZ': clientTz() },
+      body: JSON.stringify(Object.assign({}, est.estimate, {
+        description: 'rescan probe', photos: est.temp_photos, source: 'photo' })) }).then(r => r.json());
+    const st = await fetch('/api/state').then(r => r.json());
+    const meal = st.meals.find(m => m.description === 'rescan probe');
+    closeSheets();
+    openReview({ estimate: meal, editingId: meal.id,
+                 photoUrl: '/api/photo/' + meal.photos[0] });
+    const out = { visibleForPhoto: !document.getElementById('btn-rescan').hidden,
+                  itemsBefore: compItems.length,
+                  wasEditing: document.getElementById('review-sheet').dataset.editing };
+    document.getElementById('btn-rescan').click();
+    await new Promise(r => setTimeout(r, 3000));
+    out.itemsAfter = compItems.length;
+    out.editingAfter = document.getElementById('review-sheet').dataset.editing;
+    out.toast = document.getElementById('toast').hidden ? '' : document.getElementById('toast').textContent;
+    out.dateKept = document.getElementById('r-date').value === (meal.date || todayISO());
+    // A text-only estimate has no image, so the button must stay hidden.
+    closeSheets();
+    openReview({ estimate: { description: 'text only', calories: 100, protein: 5,
+                             carbs: 10, fat: 4, items: [] } });
+    out.hiddenForText = document.getElementById('btn-rescan').hidden;
+    closeSheets();
+    await fetch('/api/meals/' + meal.id, { method: 'DELETE' });
+    return JSON.stringify(out);
+  })()`);
+  const rs = JSON.parse(rescan);
+  check('rescan button appears for a meal with a photo', rs.visibleForPhoto === true, rescan);
+  check('rescan keeps the meal in edit mode (saves update, not duplicate)',
+        rs.editingAfter === rs.wasEditing && !!rs.editingAfter, rescan);
+  check('rescan repopulates the components', rs.itemsAfter >= 1 && rs.itemsBefore >= 1, rescan);
+  check('rescan reports back to the user', /Re-scanned/i.test(rs.toast || ''), rescan);
+  check('rescan keeps the chosen date', rs.dateKept === true, rescan);
+  check('rescan is hidden when there is no photo', rs.hiddenForText === true, rescan);
+
   // ---- 24-hour clock option --------------------------------------------
   const clockFmt = await evalJson(`(async () => {
     // Earlier sections navigate days; make sure we are looking at today or the

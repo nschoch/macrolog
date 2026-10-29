@@ -538,6 +538,39 @@ st, tf = req("/api/settings", "PUT", {"time_format": "12h"})
 check("time_format switches back", (tf.get("settings") or {}).get("time_format") == "12h",
       str((tf.get("settings") or {}).get("time_format")))
 
+# 29. Rescan: re-estimate from images we already hold (no re-upload needed).
+st, rem = multi("/api/estimate-meal", [("photos", "plate.jpg", jpg),
+                                       ("text", None, "about half")])
+temps29 = [os.path.basename(t) for t in (rem.get("temp_photos") or [])]
+check("estimate-meal produced a temp photo to rescan", len(temps29) == 1, str(temps29))
+st, r1 = req("/api/rescan", "POST", {"photos": temps29, "text": "about half"})
+check("rescan of a temp upload -> 200", st == 200, str(r1)[:120])
+check("rescan returns an estimate with items",
+      len((r1.get("estimate") or {}).get("items", [])) >= 1, str(r1.get("estimate"))[:120])
+check("rescan reports which photos it used", r1.get("photos") == temps29, str(r1.get("photos")))
+
+# ...and from a SAVED meal's stored photo, which is the case that matters when
+# revisiting an old entry from the meal list.
+est29 = rem.get("estimate") or {}
+st, saved29 = req("/api/meals", "POST", {
+    "description": "rescan probe", "calories": est29.get("calories") or 100,
+    "protein": est29.get("protein") or 1, "carbs": est29.get("carbs") or 1,
+    "fat": est29.get("fat") or 1, "photos": rem.get("temp_photos"), "source": "photo"})
+mid29 = (saved29 or {}).get("id")
+if mid29:
+    st, one29 = req(f"/api/meals/{mid29}")
+    stored = one29.get("photos") or []
+    st, r2 = req("/api/rescan", "POST", {"photos": stored})
+    check("rescan of a stored meal photo -> 200", st == 200, str(r2)[:120])
+    check("rescan from storage yields an estimate",
+          len((r2.get("estimate") or {}).get("items", [])) >= 1, str(r2)[:120])
+    req(f"/api/meals/{mid29}", "DELETE")
+
+st, r3 = req("/api/rescan", "POST", {"photos": ["nope-missing.jpg"]})
+check("rescan with no usable photo -> 400", st == 400, str(r3)[:100])
+st, r4 = req("/api/rescan", "POST", {"photos": ["../../etc/passwd"]})
+check("rescan refuses path traversal", st == 400, str(r4)[:100])
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))
