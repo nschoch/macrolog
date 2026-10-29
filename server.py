@@ -175,7 +175,7 @@ class Api:
         meals = db.meals_for_date(t, owner)
         item_map = db.items_for_date(t, owner)
         consumed = {k: round(sum(float(m[k]) for m in meals), 1)
-                    for k in ("calories", "protein", "carbs", "fat")}
+                    for k in ("calories", "protein", "carbs", "fat", "fiber")}
         rows = db.query("SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
         trend = weight_trend(rows)
         target = s.get("calorie_target") or tdee_from_formula(
@@ -353,6 +353,7 @@ class Api:
             "protein": float(body.get("protein") or 0),
             "carbs": float(body.get("carbs") or 0),
             "fat": float(body.get("fat") or 0),
+            "fiber": float(body.get("fiber") or 0),
         }
         # When components are supplied, the meal total IS their sum (single source
         # of truth); otherwise fall back to the flat totals the client sent.
@@ -378,6 +379,7 @@ class Api:
                   else str(body.get("kind") or "other"))[:20],
             description=meal["description"], calories=meal["calories"],
             protein=meal["protein"], carbs=meal["carbs"], fat=meal["fat"],
+            fiber=meal.get("fiber") or 0,
             confidence=float(body.get("confidence") or 0.5),
             photo_path=final_path, source=source,
             provider=str(body.get("provider") or "")[:30],
@@ -398,7 +400,8 @@ class Api:
         # Components supplied -> replace them and derive totals from the sum.
         items = _sanitize_items(body.get("items")) if "items" in body else None
         fields = {k: v for k, v in body.items()
-                  if k in ("kind", "description", "calories", "protein", "carbs", "fat")}
+                  if k in ("kind", "description", "calories", "protein",
+                           "carbs", "fat", "fiber")}
         new_date = old["date"]
         if items is not None:
             summed = _sum_items(items)
@@ -474,7 +477,8 @@ class Api:
         start = (now_local().date() - timedelta(days=days)).isoformat()
         meals = db.query(
             "SELECT date, SUM(calories) c, SUM(protein) p, SUM(carbs) cb, "
-            "SUM(fat) f, COUNT(*) n FROM meals WHERE date >= ? AND owner=? GROUP BY date "
+            "SUM(fat) f, SUM(fiber) fb, COUNT(*) n FROM meals "
+            "WHERE date >= ? AND owner=? GROUP BY date "
             "ORDER BY date", (start, owner))
         weights = db.query(
             "SELECT date, value FROM weights WHERE date >= ? AND owner=? ORDER BY date", (start, owner))
@@ -488,7 +492,8 @@ class Api:
             "days": days, "target": target,
             "intake": [{"date": r["date"], "calories": round(r["c"] or 0),
                         "protein": round(r["p"] or 0), "carbs": round(r["cb"] or 0),
-                        "fat": round(r["f"] or 0), "meals": r["n"]} for r in meals],
+                        "fat": round(r["f"] or 0), "fiber": round(r["fb"] or 0),
+                        "meals": r["n"]} for r in meals],
             "weights": [{"date": r["date"], "kg": r["value"]} for r in weights],
             "body_fat": [{"date": r["date"], "pct": r["value"]} for r in bf],
             "exercise": [{"date": r["date"], "calories": round(r["c"] or 0)} for r in ex],
@@ -684,6 +689,7 @@ def _meal_dict(m, items=None) -> dict:
     d = {"id": m["id"], "ts": m["ts"], "date": m["date"], "kind": m["kind"],
          "description": m["description"], "calories": m["calories"],
          "protein": m["protein"], "carbs": m["carbs"], "fat": m["fat"],
+         "fiber": (m["fiber"] if "fiber" in m.keys() else 0),
          "confidence": m["confidence"], "source": m["source"],
          "provider": m["provider"], "model": m["model"],
          "photo": _photo_list(m["photo_path"])[0] if m["photo_path"] else None,
@@ -707,12 +713,13 @@ def _sanitize_items(raw) -> list[dict]:
         out.append({"name": name, "grams": g, "calories": cal,
                     "protein": max(0.0, float(it.get("protein") or 0)),
                     "carbs": max(0.0, float(it.get("carbs") or 0)),
-                    "fat": max(0.0, float(it.get("fat") or 0))})
+                    "fat": max(0.0, float(it.get("fat") or 0)),
+                    "fiber": max(0.0, float(it.get("fiber") or 0))})
     return out
 
 
 def _sum_items(items: list[dict]) -> dict:
-    tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+    tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "fiber": 0.0}
     for it in items:
         for k in tot:
             tot[k] += float(it.get(k) or 0)

@@ -42,6 +42,11 @@
       </div>
     </div>
 
+    <div class="seg" id="macro-mode" role="group" aria-label="Show consumed or remaining">
+      <button data-mode="consumed">Consumed</button>
+      <button data-mode="remaining">Remaining</button>
+    </div>
+
     <div class="macro-row" id="macro-row"></div>
 
     <div class="status-strip" id="status-strip"></div>
@@ -220,7 +225,9 @@
         <label class="fld">P (g)<input id="r-pro" type="number" inputmode="numeric"></label>
         <label class="fld">C (g)<input id="r-car" type="number" inputmode="numeric"></label>
         <label class="fld">F (g)<input id="r-fat" type="number" inputmode="numeric"></label>
+        <label class="fld">Fiber (g)<input id="r-fib" type="number" inputmode="numeric" placeholder="of carbs"></label>
       </div>
+      <p class="hint">Fiber is counted inside carbs, not on top of them.</p>
     </details>
 
     <label class="fld">Meal
@@ -246,6 +253,7 @@
       <label class="fld">P (g)<input id="m-pro" type="number" inputmode="numeric"></label>
       <label class="fld">C (g)<input id="m-car" type="number" inputmode="numeric"></label>
       <label class="fld">F (g)<input id="m-fat" type="number" inputmode="numeric"></label>
+      <label class="fld">Fiber (g)<input id="m-fib" type="number" inputmode="numeric" placeholder="of carbs"></label>
     </div>
     <label class="fld">Meal
       <select id="m-kind"><option value="auto">Auto (by time)</option><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>

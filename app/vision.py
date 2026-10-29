@@ -35,10 +35,10 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "items": [
     {"name": str, "grams": number, "calories": number,
-     "protein": number, "carbs": number, "fat": number}
+     "protein": number, "carbs": number, "fat": number, "fiber": number}
   ],
   "total_calories": number, "total_protein": number,
-  "total_carbs": number, "total_fat": number,
+  "total_carbs": number, "total_fat": number, "total_fiber": number,
   "confidence": number,
   "description": str,
   "notes": str
@@ -47,6 +47,7 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 Rules:
 - All numbers are per-item absolute amounts for the WHOLE photographed portion, \
 not per 100g.
+- fiber is the portion of "carbs" that comes from fibre: report it as a NUMBER WITHIN the carb figure, never on top of it (carbs 30 and fiber 8 means 30 g total carbohydrate of which 8 g is fibre). Use 0 when unknown.
 - total_* must equal the sum of the item values.
 - confidence is 0.0-1.0: how sure you are given what is actually visible. Use \
 low confidence when the plate is crowded, food is mixed/unidentifiable, or \
@@ -69,10 +70,10 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "items": [
     {"name": str, "grams": number, "calories": number,
-     "protein": number, "carbs": number, "fat": number}
+     "protein": number, "carbs": number, "fat": number, "fiber": number}
   ],
   "total_calories": number, "total_protein": number,
-  "total_carbs": number, "total_fat": number,
+  "total_carbs": number, "total_fat": number, "total_fiber": number,
   "confidence": number,
   "description": str,
   "notes": str
@@ -80,6 +81,7 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 
 Rules:
 - All numbers are per-item ABSOLUTE amounts for the WHOLE portion actually eaten, never per 100g and never per serving.
+- fiber is the portion of "carbs" that comes from fibre: report it as a NUMBER WITHIN the carb figure, never on top of it (carbs 30 and fiber 8 means 30 g total carbohydrate of which 8 g is fibre). Use 0 when unknown.
 - total_* must equal the sum of the item values.
 - confidence is 0.0-1.0. Use HIGH confidence when a Nutrition Facts label or an explicit stated amount pins the numbers; use LOW confidence when the plate is crowded, food is mixed/unidentifiable, or portion depth is ambiguous.
 - notes: state anything you had to assume, and flag any label values used.
@@ -100,16 +102,17 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "items": [
     {"name": str, "grams": number, "calories": number,
-     "protein": number, "carbs": number, "fat": number}
+     "protein": number, "carbs": number, "fat": number, "fiber": number}
   ],
   "total_calories": number, "total_protein": number,
-  "total_carbs": number, "total_fat": number,
+  "total_carbs": number, "total_fat": number, "total_fiber": number,
   "confidence": number,
   "description": str,
   "notes": str
 }
 
 Rules:
+- fiber is the portion of "carbs" that comes from fibre: report it as a NUMBER WITHIN the carb figure, never on top of it (carbs 30 and fiber 8 means 30 g total carbohydrate of which 8 g is fibre). Use 0 when unknown.
 - total_* must equal the sum of the item values.
 - confidence 0.0-1.0: high when amounts and foods are explicit; low when you \
 had to guess portions or identify vague items ("some sauce").
@@ -192,7 +195,7 @@ def _extract_json(text: str) -> dict:
 def normalize(data: dict) -> dict:
     """Coerce arbitrary model output into the internal meal contract."""
     items = data.get("items") or []
-    tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+    tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "fiber": 0.0}
     clean_items = []
     for it in items:
         if not isinstance(it, dict):
@@ -204,6 +207,11 @@ def normalize(data: dict) -> dict:
             "protein": max(0.0, _num(it.get("protein"))),
             "carbs": max(0.0, _num(it.get("carbs"))),
             "fat": max(0.0, _num(it.get("fat"))),
+            # Fiber is a SUBSET of carbs. Clamp defensively: models occasionally
+            # report fiber > carbs, which would render as a nonsense "fiber 30 of
+            # 20 g carbs" and wrongly imply carbs should be raised.
+            "fiber": max(0.0, min(_num(it.get("fiber")),
+                                  max(0.0, _num(it.get("carbs"))))),
         }
         if row["name"]:
             clean_items.append(row)
@@ -227,6 +235,9 @@ def normalize(data: dict) -> dict:
         "protein": round(pick("total_protein"), 1),
         "carbs": round(pick("total_carbs"), 1),
         "fat": round(pick("total_fat"), 1),
+        # pick() already prefers the summed value when the model's total is far
+        # off, and the per-item values were clamped to carbs above.
+        "fiber": round(pick("total_fiber"), 1),
         "confidence": min(1.0, max(0.05, _num(data.get("confidence"), 0.5))),
         "description": str(data.get("description") or "").strip()[:200],
         "notes": str(data.get("notes") or "").strip()[:400],

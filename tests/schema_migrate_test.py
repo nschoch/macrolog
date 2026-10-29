@@ -71,6 +71,13 @@ def main():
     check("body_fat legacy index also dropped",
           "idx_bf_date" not in indexes(path, "body_fat"), str(indexes(path, "body_fat")))
 
+    # fiber was added later: legacy tables must gain the column, defaulting to 0.
+    con = sqlite3.connect(path)
+    for tbl in ("meals", "meal_items"):
+        cols = {r[1] for r in con.execute(f"PRAGMA table_info({tbl})")}
+        check(f"{tbl} gained a fiber column", "fiber" in cols, str(sorted(cols)))
+    con.close()
+
     # The user-facing failure: two accounts weighing in on one day.
     try:
         db.set_weight("2026-10-29", 1793300000, 71.2, owner="alice")

@@ -164,8 +164,14 @@ def macronutrient_targets(calorie_target: float, settings: dict) -> dict:
         remaining = max(0.0, calorie_target - protein_g * 4 - fat_g * 9)
     carbs_g = round(remaining / 4.0)
 
+    # Fiber target: 14 g per 1000 kcal (US Dietary Reference Intake), which scales
+    # with the calorie target instead of being a fixed number that is unreachable
+    # on a cut. Fiber is a SUBSET of carbs above -- this is a floor to aim for,
+    # not a fourth macro to add into the calorie budget.
+    fiber_g = round(calorie_target / 1000.0 * 14.0)
+
     return {"calories": round(calorie_target), "protein": protein_g,
-            "carbs": carbs_g, "fat": fat_g}
+            "carbs": carbs_g, "fat": fat_g, "fiber": fiber_g}
 
 
 def adapt_targets(db, settings: dict, today=None, owner: str = "default") -> dict:

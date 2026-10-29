@@ -184,15 +184,41 @@ $('day-pick').addEventListener('change', (e) => {
   refresh();
 });
 
+// Consumed vs remaining is a display preference, so it lives on the device
+// rather than in the per-user settings blob.
+function macroMode() {
+  try { return localStorage.getItem('ml_macro_mode') === 'consumed' ? 'consumed' : 'remaining'; }
+  catch (_) { return 'remaining'; }
+}
+
+function renderMacroMode() {
+  const host = $('macro-mode');
+  if (!host) return;
+  const mode = macroMode();
+  host.querySelectorAll('button[data-mode]').forEach(b =>
+    b.classList.toggle('on', b.dataset.mode === mode));
+}
+
+$('macro-mode').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-mode]');
+  if (!b) return;
+  try { localStorage.setItem('ml_macro_mode', b.dataset.mode); } catch (_) { /* private mode */ }
+  if (state) renderToday(state);
+});
+
 function renderToday(s) {
   renderUserChip(s);
   renderDayHeader(s.date);
+  renderMacroMode();
   const c = s.consumed, t = s.targets;
   const exercise = s.exercise || 0;
   const remaining = t.calories - c.calories + exercise;
+  const left = macroMode() === 'remaining';
 
-  $('kcal-left').textContent = fmt(Math.abs(remaining));
-  $('ring-label').textContent = remaining >= 0 ? 'kcal left' : 'kcal over';
+  $('kcal-left').textContent = fmt(left ? Math.abs(remaining) : c.calories);
+  $('ring-label').textContent = left
+    ? (remaining >= 0 ? 'kcal left' : 'kcal over')
+    : 'kcal eaten';
 
   const frac = Math.max(0, Math.min(1, (c.calories - exercise) / (t.calories || 1)));
   const ring = $('ring-cal');
@@ -205,12 +231,21 @@ function renderToday(s) {
     ['carbs', 'Carbs', c.carbs, t.carbs, 'var(--carbs)'],
     ['fat', 'Fat', c.fat, t.fat, 'var(--fat)'],
   ];
-  $('macro-row').innerHTML = macros.map(([, label, got, want, color]) => `
+  const fiberGot = c.fiber || 0, fiberWant = t.fiber || 0;
+  $('macro-row').innerHTML = macros.map(([key, label, got, want, color]) => {
+    const shown = left ? Math.max(0, want - got) : got;
+    // Fiber rides along with carbs as a subset, so it is a quiet sub-line there
+    // rather than a fourth bar implying another thing to hit.
+    const sub = key === 'carbs'
+      ? `<div class="macro-sub"><span>fiber</span><b>${fmt(fiberGot)} / ${fmt(fiberWant)}g</b></div>`
+      : '';
+    return `
     <div class="macro">
       <div class="macro-name">${label}</div>
-      <div class="macro-val">${fmt(got)}<span>/${fmt(want)}g</span></div>
-      <div class="bar"><i style="width:${Math.min(100, want ? got / want * 100 : 0)}%;background:${color}"></i></div>
-    </div>`).join('');
+      <div class="macro-val">${fmt(shown)}<span>of ${fmt(want)}g</span></div>
+      <div class="bar"><i style="width:${Math.min(100, want ? got / want * 100 : 0)}%;background:${color}"></i></div>${sub}
+    </div>`;
+  }).join('');
 
   renderStatus(s);
   renderGroups(s.groups, s.meals);
@@ -364,7 +399,8 @@ function densityOf(it) {
   if (!(+it.grams > 0)) return null;
   const g = +it.grams;
   return { calories: (+it.calories || 0) / g, protein: (+it.protein || 0) / g,
-           carbs: (+it.carbs || 0) / g, fat: (+it.fat || 0) / g };
+           carbs: (+it.carbs || 0) / g, fat: (+it.fat || 0) / g,
+           fiber: (+it.fiber || 0) / g };
 }
 
 function ensureDensity(it) {
@@ -384,6 +420,7 @@ function applyDensity(it, grams) {
   it.protein = +(u.protein * grams).toFixed(1);
   it.carbs = +(u.carbs * grams).toFixed(1);
   it.fat = +(u.fat * grams).toFixed(1);
+  it.fiber = +(u.fiber * grams).toFixed(1);
   return it;
 }
 
@@ -405,18 +442,22 @@ function sumComps() {
   return compItems.reduce((a, i) => ({
     calories: a.calories + (+i.calories || 0), protein: a.protein + (+i.protein || 0),
     carbs: a.carbs + (+i.carbs || 0), fat: a.fat + (+i.fat || 0),
-  }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+    fiber: a.fiber + (+i.fiber || 0),
+  }), { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 });
 }
 
 function refreshTotals() {
   const hasComps = compItems.length > 0;
   const t = sumComps();
-  $('r-total-shown').textContent = `${fmt(t.calories)} kcal · P${Math.round(t.protein)} C${Math.round(t.carbs)} F${Math.round(t.fat)}`;
+  $('r-total-shown').textContent = `${fmt(t.calories)} kcal · P${Math.round(t.protein)} `
+    + `C${Math.round(t.carbs)} F${Math.round(t.fat)}`
+    + (t.fiber ? ` · fiber ${Math.round(t.fiber)}` : '');
   // When components exist they are the source of truth; reflect them into the
   // (collapsible) manual total fields so either view is consistent.
   if (hasComps) {
     $('r-cal').value = Math.round(t.calories); $('r-pro').value = Math.round(t.protein);
     $('r-car').value = Math.round(t.carbs); $('r-fat').value = Math.round(t.fat);
+    if ($('r-fib')) $('r-fib').value = +(t.fiber || 0).toFixed(1);
   }
   $('r-nocomp-hint').hidden = hasComps;
   $('r-totals-wrap').style.display = hasComps ? 'block' : 'none';
@@ -474,7 +515,7 @@ function syncRowFromItem(row, it) {
     const f = inp.dataset.f;
     if (f === 'grams' || f === 'name') continue;   // never touch what's typed
     if (inp === document.activeElement) continue;
-    const shown = (f === 'protein' || f === 'fat' || f === 'carbs')
+    const shown = (f === 'protein' || f === 'fat' || f === 'carbs' || f === 'fiber')
       ? String(+(+it[f]).toFixed(1)) : String(Math.round(+it[f] || 0));
     if (inp.value !== shown) inp.value = shown;
   }
@@ -503,8 +544,9 @@ function renderCompEditor() {
         <div class="ir-cell"><label>P g</label><input type="number" inputmode="numeric" value="${(+it.protein).toFixed(1)}" data-f="protein" ${ro}></div>
         <div class="ir-cell"><label>C g</label><input type="number" inputmode="numeric" value="${(+it.carbs).toFixed(1)}" data-f="carbs" ${ro}></div>
       </div>
-      <div class="ir-grid" style="grid-template-columns:1fr 1fr">
+      <div class="ir-grid" style="grid-template-columns:1fr 1fr 1fr">
         <div class="ir-cell"><label>F g</label><input type="number" inputmode="numeric" value="${(+it.fat).toFixed(1)}" data-f="fat" ${ro}></div>
+        <div class="ir-cell"><label>Fib g</label><input type="number" inputmode="numeric" value="${(+(it.fiber || 0)).toFixed(1)}" data-f="fiber" ${ro} placeholder="of carbs"></div>
       </div>
     </div>`;
   }).join('');
@@ -651,12 +693,13 @@ $('btn-save-review').addEventListener('click', async () => {
     payload.items = cleanComps;
     const t = sumComps();
     payload.calories = t.calories; payload.protein = t.protein;
-    payload.carbs = t.carbs; payload.fat = t.fat;
+    payload.carbs = t.carbs; payload.fat = t.fat; payload.fiber = t.fiber;
   } else {
     payload.calories = Number($('r-cal').value) || 0;
     payload.protein = Number($('r-pro').value) || 0;
     payload.carbs = Number($('r-car').value) || 0;
     payload.fat = Number($('r-fat').value) || 0;
+    payload.fiber = Number($('r-fib') ? $('r-fib').value : 0) || 0;
   }
   if (payload.calories <= 0) { toast('Calories must be above zero', true); return; }
 
@@ -697,6 +740,7 @@ $('btn-save-manual').addEventListener('click', async () => {
     protein: Number($('m-pro').value) || 0,
     carbs: Number($('m-car').value) || 0,
     fat: Number($('m-fat').value) || 0,
+    fiber: Number($('m-fib') ? $('m-fib').value : 0) || 0,
     kind: $('m-kind').value,
     source: 'manual',
     date: viewDate || undefined,

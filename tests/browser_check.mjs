@@ -512,6 +512,57 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- Consumed / Remaining toggle + fiber shown inside carbs ------------
+  const modes = await evalJson(`(() => {
+    document.querySelector('#macro-mode button[data-mode="remaining"]').click();
+    const read = () => ({
+      mode: [...document.querySelectorAll('#macro-mode button')].find(b => b.classList.contains('on')).dataset.mode,
+      ring: document.getElementById('kcal-left').textContent,
+      label: document.getElementById('ring-label').textContent,
+      macros: [...document.querySelectorAll('.macro-val')].map(e => e.textContent),
+      fiber: (document.querySelector('.macro-sub') || {}).textContent || null,
+    });
+    const remaining = read();
+    document.querySelector('#macro-mode button[data-mode="consumed"]').click();
+    const consumed = read();
+    document.querySelector('#macro-mode button[data-mode="remaining"]').click();
+    return JSON.stringify({ remaining, consumed, stored: localStorage.getItem('ml_macro_mode') });
+  })()`);
+  const md = JSON.parse(modes);
+  check('toggle switches to consumed values',
+        md.consumed.mode === 'consumed' && /eaten/i.test(md.consumed.label), modes);
+  check('toggle switches back to remaining values',
+        md.remaining.mode === 'remaining' && /left|over/i.test(md.remaining.label), modes);
+  check('the two modes show different numbers for the same day',
+        md.consumed.macros[0] !== md.remaining.macros[0], modes);
+  check('mode choice is remembered', md.stored === 'remaining', String(md.stored));
+  check('fiber is shown inside the carbs card',
+        !!md.remaining.fiber && /fiber/i.test(md.remaining.fiber), String(md.remaining.fiber));
+
+  // ---- Fiber is tracked per component and scales with the portion --------
+  const fib = await evalJson(`(() => {
+    openReview({ estimate: { description: 'oats', calories: 190, protein: 6, carbs: 32,
+                             fat: 3, fiber: 5, items: [{ name: 'oats', grams: 50,
+                             calories: 190, protein: 6, carbs: 32, fat: 3, fiber: 5 }] } });
+    const fibEl = () => document.querySelector('.item-row[data-i="0"] input[data-f="fiber"]');
+    const out = { initial: fibEl().value, autoReadonly: fibEl().readOnly,
+                  totals: document.getElementById('r-total-shown').textContent };
+    const g = document.querySelector('.item-row[data-i="0"] input[data-f="grams"]');
+    g.value = '100'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    out.afterDouble = { fiber: fibEl().value,
+                        carbs: document.querySelector('.item-row[data-i="0"] input[data-f="carbs"]').value,
+                        fiberModel: compItems[0].fiber };
+    out.totalsAfter = document.getElementById('r-total-shown').textContent;
+    return JSON.stringify(out);
+  })()`);
+  const fb = JSON.parse(fib);
+  check('component carries a fiber field', fb.initial === '5.0', fib);
+  check('fiber is derived (read-only) in auto mode', fb.autoReadonly === true, fib);
+  check('fiber scales with the portion like the other macros',
+        fb.afterDouble.fiber === '10' && fb.afterDouble.carbs === '64', fib);
+  check('totals line reports fiber', /fiber\s*5/.test(fb.totals) && /fiber\s*10/.test(fb.totalsAfter), fib);
+  await evalJson(`closeSheets()`);
+
   // ---- Portion scaling: editing grams rescales macros and persists -------
   const scale = await evalJson(`(() => {
     openReview({ estimate: { description: 'scale probe', calories: 380, protein: 28.7,

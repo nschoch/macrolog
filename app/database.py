@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS meals (
     protein       REAL    NOT NULL DEFAULT 0,
     carbs         REAL    NOT NULL DEFAULT 0,
     fat           REAL    NOT NULL DEFAULT 0,
+    fiber         REAL    NOT NULL DEFAULT 0,   -- subset OF carbs, not extra
     confidence    REAL    NOT NULL DEFAULT 0.5,
     photo_path    TEXT,
     source        TEXT    NOT NULL DEFAULT 'photo',   -- photo|manual
@@ -100,7 +101,8 @@ CREATE TABLE IF NOT EXISTS meal_items (
     calories    REAL    NOT NULL DEFAULT 0,
     protein     REAL    NOT NULL DEFAULT 0,
     carbs       REAL    NOT NULL DEFAULT 0,
-    fat         REAL    NOT NULL DEFAULT 0
+    fat         REAL    NOT NULL DEFAULT 0,
+    fiber       REAL    NOT NULL DEFAULT 0    -- subset OF carbs, not extra
 );
 CREATE INDEX IF NOT EXISTS idx_items_meal ON meal_items(meal_id, ord);
 """
@@ -132,6 +134,13 @@ class Database:
             if "owner" not in cols:
                 self._conn.execute(
                     f"ALTER TABLE {tbl} ADD COLUMN owner TEXT NOT NULL DEFAULT 'default'")
+        # fiber arrived later and is a SUBSET of carbs (carbs stay the total), so
+        # existing rows default to 0 rather than needing any backfill maths.
+        for tbl in ("meals", "meal_items"):
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({tbl})")}
+            if "fiber" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN fiber REAL NOT NULL DEFAULT 0")
         # Drop every legacy UNIQUE index that keys on date WITHOUT owner, then
         # (re)create the owner-scoped ones. Pre-multi-user databases enforced one
         # row per date across the whole household; once several OIDC users share
@@ -228,20 +237,20 @@ class Database:
     # -- meals -----------------------------------------------------------
     def add_meal(self, *, date: str, ts: int, kind: str, description: str,
                  calories: float, protein: float, carbs: float, fat: float,
-                 confidence: float, photo_path, source: str,
+                 fiber: float = 0.0, confidence: float, photo_path, source: str,
                  provider: str, model: str, raw_json: str,
                  owner: str = "default") -> int:
         return self.execute(
             "INSERT INTO meals(owner,ts,date,kind,description,calories,protein,carbs,fat,"
-            "confidence,photo_path,source,provider,model,raw_json,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "fiber,confidence,photo_path,source,provider,model,raw_json,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (owner, ts, date, kind, description, calories, protein, carbs, fat,
-             confidence, photo_path, source, provider, model, raw_json,
-             int(time.time())),
+             fiber or 0.0, confidence, photo_path, source, provider, model,
+             raw_json, int(time.time())),
         )
 
     def update_meal(self, meal_id: int, owner: str = "default", **fields) -> None:
-        allowed = {"kind", "description", "calories", "protein", "carbs", "fat"}
+        allowed = {"kind", "description", "calories", "protein", "carbs", "fat", "fiber"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -267,31 +276,34 @@ class Database:
     def replace_meal_items(self, meal_id: int, items: list[dict]) -> dict:
         """Overwrite a meal's components and recompute its cached totals.
 
-        Returns the summed {calories,protein,carbs,fat} so callers can persist
+        Returns the summed {calories,protein,carbs,fat,fiber} so callers can persist
         them onto the meals row too. Totals are ALWAYS the sum of items when any
         items exist, keeping meal.total == SUM(components) as an invariant.
         """
         self.execute("DELETE FROM meal_items WHERE meal_id=?", (meal_id,))
         rows = []
-        tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+        tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "fiber": 0.0}
         for i, it in enumerate(items):
             g = float(it.get("grams") or 0)
             cal = float(it.get("calories") or 0)
             p = float(it.get("protein") or 0)
             c = float(it.get("carbs") or 0)
             f = float(it.get("fat") or 0)
-            rows.append((meal_id, i, str(it.get("name") or "")[:120], g, cal, p, c, f))
+            # fiber is reported INSIDE carbs, so it is summed for display only and
+            # never added on top of the carb total.
+            fb = float(it.get("fiber") or 0)
+            rows.append((meal_id, i, str(it.get("name") or "")[:120], g, cal, p, c, f, fb))
             tot["calories"] += cal; tot["protein"] += p
-            tot["carbs"] += c; tot["fat"] += f
+            tot["carbs"] += c; tot["fat"] += f; tot["fiber"] += fb
         if rows:
             self.executemany(
-                "INSERT INTO meal_items(meal_id,ord,name,grams,calories,protein,carbs,fat) "
-                "VALUES(?,?,?,?,?,?,?,?)", rows)
+                "INSERT INTO meal_items(meal_id,ord,name,grams,calories,protein,carbs,fat,fiber) "
+                "VALUES(?,?,?,?,?,?,?,?,?)", rows)
         return {k: round(v, 1) for k, v in tot.items()}
 
     def items_for_meal(self, meal_id: int) -> list[dict]:
         return [dict(r) for r in self.query(
-            "SELECT id,name,grams,calories,protein,carbs,fat FROM meal_items "
+            "SELECT id,name,grams,calories,protein,carbs,fat,fiber FROM meal_items "
             "WHERE meal_id=? ORDER BY ord", (meal_id,))]
 
     def items_for_date(self, date: str, owner: str = "default") -> dict:
@@ -304,7 +316,8 @@ class Database:
             out.setdefault(r["meal_id"], []).append({
                 "id": r["id"], "name": r["name"], "grams": r["grams"],
                 "calories": r["calories"], "protein": r["protein"],
-                "carbs": r["carbs"], "fat": r["fat"]})
+                "carbs": r["carbs"], "fat": r["fat"],
+                "fiber": (r["fiber"] if "fiber" in r.keys() else 0)})
         return out
 
     # -- weights ---------------------------------------------------------

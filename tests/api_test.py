@@ -410,6 +410,55 @@ check("history spans enough to compute staleness", gap_days >= 400, str(gap_days
 
 
 
+# 24. fiber: a SUBSET of carbs, tracked per item and summed per day.
+st, fm = req("/api/meals", "POST", {
+    "description": "fiber probe", "calories": 300, "protein": 9, "carbs": 50,
+    "fat": 6, "fiber": 9, "source": "manual",
+    "items": [{"name": "oats", "grams": 50, "calories": 190, "protein": 6,
+               "carbs": 32, "fat": 3, "fiber": 5},
+              {"name": "berries", "grams": 80, "calories": 110, "protein": 3,
+               "carbs": 18, "fat": 3, "fiber": 4}]})
+fmid = (fm or {}).get("id")
+check("meal with fiber saves", st in (200, 201) and fmid, str(st))
+if fmid:
+    st, one = req(f"/api/meals/{fmid}")
+    check("item fiber persists", [i.get("fiber") for i in one.get("items", [])] == [5.0, 4.0],
+          str([i.get("fiber") for i in one.get("items", [])]))
+    check("meal fiber is the item sum", one.get("fiber") == 9.0, str(one.get("fiber")))
+    check("fiber never exceeds carbs", one["fiber"] <= one["carbs"],
+          f"fiber={one['fiber']} carbs={one['carbs']}")
+    st, sd = req("/api/state?date=" + one["date"])
+    check("state consumed includes fiber",
+          abs((sd.get("consumed") or {}).get("fiber", 0) - 9.0) < 0.01,
+          str(sd.get("consumed")))
+    check("targets expose a fiber goal", isinstance((sd.get("targets") or {}).get("fiber"), int),
+          str((sd.get("targets") or {}).get("fiber")))
+    # fiber is editable on an existing meal
+    st, up = req(f"/api/meals/{fmid}", "PATCH", {"fiber": 12})
+    check("fiber editable via PATCH", st == 200 and (up.get("fiber") == 12
+          or req(f"/api/meals/{fmid}")[1].get("fiber") == 12), str(st))
+    req(f"/api/meals/{fmid}", "DELETE")
+
+# 25. history aggregates fiber per day
+st, hist2 = req("/api/history?days=5")
+check("history intake rows carry fiber",
+      all("fiber" in d for d in hist2.get("intake", [])), str(hist2.get("intake"))[:120])
+
+# 26. vision.normalize clamps fiber inside carbs
+import importlib.util as _ilu2
+_root2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_spec2 = _ilu2.spec_from_file_location("_vision2", os.path.join(_root2, "app", "vision.py"))
+_v2 = _ilu2.module_from_spec(_spec2); _spec2.loader.exec_module(_v2)
+n = _v2.normalize({"items": [
+    {"name": "oats", "grams": 50, "calories": 190, "protein": 6, "carbs": 32, "fat": 3, "fiber": 5},
+    {"name": "impossible", "grams": 10, "calories": 20, "protein": 0, "carbs": 2, "fat": 1, "fiber": 9}],
+    "total_calories": 210, "total_protein": 6, "total_carbs": 34, "total_fat": 4,
+    "total_fiber": 14, "confidence": 0.8})
+check("normalize clamps per-item fiber to its carbs",
+      n["items"][1]["fiber"] == 2.0, str(n["items"][1]))
+check("normalize sums fiber rather than trusting a wild total",
+      n["fiber"] == 7.0, str(n.get("fiber")))
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))
