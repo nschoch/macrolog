@@ -420,7 +420,7 @@ function applyDensity(it, grams) {
   it.protein = +(u.protein * grams).toFixed(1);
   it.carbs = +(u.carbs * grams).toFixed(1);
   it.fat = +(u.fat * grams).toFixed(1);
-  it.fiber = +(u.fiber * grams).toFixed(1);
+  it.fiber = +((u.fiber || 0) * grams).toFixed(1);
   return it;
 }
 
@@ -528,6 +528,13 @@ function renderCompEditor() {
     const manual = isManual(it);
     const ro = manual ? '' : 'readonly';
     const weightKnown = +it.grams > 0;
+    // Labels are spelled out (P g / F g were unreadable) and the unit lives
+    // INSIDE the field so "6" reads as "6 g" without an extra column.
+    const field = (label, key, unit, opts = '') => `
+      <label class="ir-cell"><span class="ir-lab">${label}</span>
+        <span class="num"><input type="number" inputmode="numeric"
+          value="${opts.raw ? opts.raw : (+it[key] || 0)}" data-f="${key}" ${opts.ro || ''}><i>${unit}</i></span>
+      </label>`;
     return `
     <div class="item-row" data-i="${idx}">
       <div class="ir-top">
@@ -538,15 +545,14 @@ function renderCompEditor() {
           ${manual ? 'manual' : 'auto'}</button>
         <button class="ir-del" title="Remove" data-del="${idx}">×</button>
       </div>
-      <div class="ir-grid">
-        <div class="ir-cell"><label>g${weightKnown || manual ? '' : ' *'}</label><input type="number" inputmode="numeric" value="${+it.grams || ''}" data-f="grams"></div>
-        <div class="ir-cell"><label>kcal</label><input type="number" inputmode="numeric" value="${Math.round(it.calories) || ''}" data-f="calories" ${ro}></div>
-        <div class="ir-cell"><label>P g</label><input type="number" inputmode="numeric" value="${(+it.protein).toFixed(1)}" data-f="protein" ${ro}></div>
-        <div class="ir-cell"><label>C g</label><input type="number" inputmode="numeric" value="${(+it.carbs).toFixed(1)}" data-f="carbs" ${ro}></div>
-      </div>
-      <div class="ir-grid" style="grid-template-columns:1fr 1fr 1fr">
-        <div class="ir-cell"><label>F g</label><input type="number" inputmode="numeric" value="${(+it.fat).toFixed(1)}" data-f="fat" ${ro}></div>
-        <div class="ir-cell"><label>Fib g</label><input type="number" inputmode="numeric" value="${(+(it.fiber || 0)).toFixed(1)}" data-f="fiber" ${ro} placeholder="of carbs"></div>
+      <div class="ir-fields">
+        ${field(weightKnown || manual ? 'Grams' : 'Grams *', 'grams', 'g',
+                 { raw: +it.grams || '' })}
+        ${field('Calories', 'calories', 'kcal', { ro, raw: Math.round(it.calories) || '' })}
+        ${field('Protein', 'protein', 'g', { ro, raw: (+it.protein).toFixed(1) })}
+        ${field('Carbs', 'carbs', 'g', { ro, raw: (+it.carbs).toFixed(1) })}
+        ${field('Fat', 'fat', 'g', { ro, raw: (+it.fat).toFixed(1) })}
+        ${field('Fiber <em>of carbs</em>', 'fiber', 'g', { raw: (+(it.fiber || 0)).toFixed(1) })}
       </div>
     </div>`;
   }).join('');
@@ -610,6 +616,22 @@ $('r-items').addEventListener('input', (ev) => {
   const it = compItems[idx]; if (!it) return;
   if (f === 'name') { it.name = raw; return; }
   const val = Number(raw) || 0;
+  if (f === 'fiber') {
+    // Fiber is editable even in auto mode: the estimator sometimes omits it and
+    // meals logged before it existed store 0, but it never affects the calorie
+    // budget. Clamp to carbs (the subset rule) and re-anchor per gram so later
+    // portion changes keep the correction.
+    const cap = +it.carbs || 0;
+    const v = cap > 0 ? Math.min(val, cap) : val;
+    if (val > cap && cap > 0) toast(`Fiber can't exceed carbs (${cap} g)`, true);
+    it.fiber = v;
+    if (+it.grams > 0) {
+      it._unit = Object.assign({}, it._unit || densityOf(it) || {}, { fiber: v / (+it.grams) });
+    }
+    syncRowFromItem(row, it);
+    refreshTotals();
+    return;
+  }
   if (f === 'grams') {
     rescaleItem(it, val);
     // Never re-render here: replacing innerHTML destroys the input being typed
@@ -620,6 +642,7 @@ $('r-items').addEventListener('input', (ev) => {
   }
   if (isManual(it)) {
     it[f] = val;
+    if (f === 'carbs' && (+it.fiber || 0) > val) it.fiber = val;
     // A manual edit re-anchors density from what is on screen, so flipping back
     // to auto scales from the numbers the user just confirmed.
     if (+it.grams > 0) {

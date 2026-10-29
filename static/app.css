@@ -374,10 +374,25 @@ button { cursor: pointer; }
 .item-row .ir-name { flex: 1; min-width: 0; background: transparent; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font-size: 14px; padding: 3px 2px; margin: 0; }
 .item-row .ir-name:focus { outline: none; border-bottom-color: var(--accent-dim); }
 .item-row .ir-del { background: none; border: 0; color: var(--danger); font-size: 18px; line-height: 1; padding: 2px 6px; cursor: pointer; }
-.item-row .ir-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.item-row .ir-cell { display: flex; flex-direction: column; }
-.item-row .ir-cell label { font-size: 9.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.item-row .ir-cell input { margin: 1px 0 0; padding: 5px 6px; font-size: 13px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; color: var(--text); width: 100%; }
+/* Two columns so spelled-out labels fit without truncation. */
+.item-row .ir-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.item-row .ir-cell { display: flex; flex-direction: column; min-width: 0; }
+.item-row .ir-lab { font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 3px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.item-row .ir-lab em { font-style: normal; text-transform: none; letter-spacing: 0;
+  color: #6b7280; font-size: 9.5px; }
+.item-row .ir-cell input { margin: 0; padding: 7px 30px 7px 9px; font-size: 14px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  color: var(--text); width: 100%; box-sizing: border-box; }
+/* Unit sits inside the field ("6 g"), right-aligned and non-interactive. */
+.item-row .num { position: relative; display: block; }
+.item-row .num i { position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  font-style: normal; font-size: 11px; color: var(--muted); pointer-events: none; }
+/* Native spinners would overlap the unit suffix; keyboard arrows still work. */
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .item-row .ir-cell input:focus { outline: none; border-color: var(--accent-dim); }
 .totals-toggle { margin: 4px 0 12px; }
 .totals-toggle summary { cursor: pointer; font-size: 14px; color: var(--muted); list-style: none; }

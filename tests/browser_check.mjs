@@ -539,28 +539,53 @@ try {
   check('fiber is shown inside the carbs card',
         !!md.remaining.fiber && /fiber/i.test(md.remaining.fiber), String(md.remaining.fiber));
 
-  // ---- Fiber is tracked per component and scales with the portion --------
+  // ---- Field labels spelled out, units inside the input, fiber correctable --
   const fib = await evalJson(`(() => {
-    openReview({ estimate: { description: 'oats', calories: 190, protein: 6, carbs: 32,
-                             fat: 3, fiber: 5, items: [{ name: 'oats', grams: 50,
-                             calories: 190, protein: 6, carbs: 32, fat: 3, fiber: 5 }] } });
-    const fibEl = () => document.querySelector('.item-row[data-i="0"] input[data-f="fiber"]');
-    const out = { initial: fibEl().value, autoReadonly: fibEl().readOnly,
-                  totals: document.getElementById('r-total-shown').textContent };
-    const g = document.querySelector('.item-row[data-i="0"] input[data-f="grams"]');
-    g.value = '100'; g.dispatchEvent(new Event('input', { bubbles: true }));
-    out.afterDouble = { fiber: fibEl().value,
-                        carbs: document.querySelector('.item-row[data-i="0"] input[data-f="carbs"]').value,
-                        fiberModel: compItems[0].fiber };
-    out.totalsAfter = document.getElementById('r-total-shown').textContent;
+    openReview({ estimate: { description: 'psyllium', calories: 10, protein: 0.1,
+                             carbs: 5.5, fat: 0.1, fiber: 0,
+                             items: [{ name: 'Psyllium husk', grams: 6, calories: 10,
+                             protein: 0.1, carbs: 5.5, fat: 0.1, fiber: 0 }] } });
+    const row = document.querySelector('.item-row');
+    const out = {
+      // No regex on purpose: inside a Node template literal a "\s" escape
+      // collapses to "s", which turned "Grams" into "Gram" and made this
+      // assertion look like a product bug.
+      labels: [...row.querySelectorAll('.ir-lab')].map(e => e.textContent.trim()),
+      units: [...row.querySelectorAll('.num i')].map(e => e.textContent),
+      fiberEditable: !row.querySelector('[data-f="fiber"]').readOnly,
+      macrosLocked: row.querySelector('[data-f="calories"]').readOnly,
+      initialFiber: row.querySelector('[data-f="fiber"]').value,
+    };
+    // Fiber can be corrected in auto mode (the estimator often omits it, and
+    // meals logged before fiber existed store 0) and then follows the portion.
+    const f = row.querySelector('[data-f="fiber"]');
+    f.value = '4.5'; f.dispatchEvent(new Event('input', { bubbles: true }));
+    out.afterCorrect = { fiber: compItems[0].fiber, totals: document.getElementById('r-total-shown').textContent };
+    const g = row.querySelector('[data-f="grams"]');
+    g.value = '12'; g.dispatchEvent(new Event('input', { bubbles: true }));
+    out.afterDouble = { grams: compItems[0].grams, fiber: compItems[0].fiber,
+                        shown: row.querySelector('[data-f="fiber"]').value };
+    // subset rule still enforced when correcting
+    const f2 = row.querySelector('[data-f="fiber"]');
+    f2.value = '99'; f2.dispatchEvent(new Event('input', { bubbles: true }));
+    out.clamped = { fiber: compItems[0].fiber, carbs: compItems[0].carbs };
     return JSON.stringify(out);
   })()`);
   const fb = JSON.parse(fib);
-  check('component carries a fiber field', fb.initial === '5.0', fib);
-  check('fiber is derived (read-only) in auto mode', fb.autoReadonly === true, fib);
-  check('fiber scales with the portion like the other macros',
-        fb.afterDouble.fiber === '10' && fb.afterDouble.carbs === '64', fib);
-  check('totals line reports fiber', /fiber\s*5/.test(fb.totals) && /fiber\s*10/.test(fb.totalsAfter), fib);
+  check('component fields are spelled out, not abbreviated',
+        JSON.stringify(fb.labels) === JSON.stringify(['Grams', 'Calories', 'Protein', 'Carbs', 'Fat', 'Fiber of carbs']),
+        JSON.stringify(fb.labels));
+  check('units are shown inside each input',
+        JSON.stringify(fb.units) === JSON.stringify(['g', 'kcal', 'g', 'g', 'g', 'g']),
+        JSON.stringify(fb.units));
+  check('fiber is editable while the calorie-bearing macros stay derived',
+        fb.fiberEditable === true && fb.macrosLocked === true, fib);
+  check('a missing fiber value can be corrected in auto mode',
+        fb.initialFiber === '0.0' && fb.afterCorrect.fiber === 4.5
+        && /fiber\s*5/.test(fb.afterCorrect.totals), fib);
+  check('corrected fiber then scales with the portion',
+        fb.afterDouble.grams === 12 && fb.afterDouble.fiber === 9 && fb.afterDouble.shown === '9', fib);
+  check('fiber is still clamped to carbs', fb.clamped.fiber === fb.clamped.carbs, fib);
   await evalJson(`closeSheets()`);
 
   // ---- Portion scaling: editing grams rescales macros and persists -------
