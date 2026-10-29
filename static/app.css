@@ -104,6 +104,25 @@ input, select, button { font: inherit; color: inherit; }
 .pill.warn { border-color: #6b5320; color: #fcd34d; }
 .pill.ok { border-color: #1f4d33; color: #6ee7a8; }
 
+/* ---------------------------------------------------- provider editor */
+.prov-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.prov-row:last-child { border-bottom: 0; }
+.prov-top { display: flex; align-items: center; gap: 6px; }
+.prov-top .prov-name { flex: none; }
+.prov-top .badge { margin-left: 4px; }
+.prov-en { display: flex; align-items: center; gap: 4px; font-size: 11.5px;
+  color: var(--muted); margin-left: auto; }
+.prov-en input { width: auto; margin: 0; }
+.prov-del { color: var(--danger); }
+.prov-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.prov-fields .fld { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); }
+.prov-fields input { margin-top: 3px; font-size: 14px; text-transform: none;
+  letter-spacing: 0; }
+.prov-fields input:disabled { opacity: .45; }
+.prov-btns { margin-top: 12px; }
+.prov-btns button { flex: none; }
+
 /* ------------------------------------------------------------- day nav */
 .day-nav { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 4px 0 2px; }
 .day-nav h2 { font-size: 15px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); min-width: 132px; text-align: center; }

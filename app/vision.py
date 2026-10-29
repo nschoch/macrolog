@@ -347,15 +347,20 @@ class OpenAICompatProvider:
                      os.environ.get("QWENPLAN_MODEL", "qwen3.8-flash")),
         }
         base, model = defaults.get(name, ("", "gpt-4o-mini"))
-        self.base = (cfg.get("base_url") or base).rstrip("/")
-        # Resolution order: explicit per-provider config > QWENPLAN_MODEL env >
-        # built-in default. The env var must beat the *default*, not merely set
-        # `model`, because the provider list is persisted in the settings DB —
-        # without this, a stale stored "qwen3.8-max" silently defeats an
-        # operator editing .env. So drop the stored value when env is set.
-        if name == "qwenplan" and os.environ.get("QWENPLAN_MODEL"):
-            cfg = {k: v for k, v in cfg.items() if k != "model"}
-        self.model = cfg.get("model", model)
+        # Precedence, most explicit first:
+        #   1. value saved from the Settings UI (a deliberate user choice)
+        #   2. QWENPLAN_* env vars (operator/deploy-time default)
+        #   3. built-in default
+        # Env used to outrank stored config so that editing .env took effect
+        # immediately; but the Settings UI writes stored config, which would
+        # then be silently ignored -- the same "it changed nothing" failure seen
+        # from the other side. Deploy-time env is now only a fallback.
+        stored_model = (cfg.get("model") or "").strip()
+        stored_base = (cfg.get("base_url") or "").strip()
+        env_model = os.environ.get("QWENPLAN_MODEL", "") if name == "qwenplan" else ""
+        env_base = os.environ.get("QWENPLAN_BASE_URL", "") if name == "qwenplan" else ""
+        self.model = stored_model or env_model or model
+        self.base = (stored_base or env_base or base).rstrip("/")
 
     def estimate(self, image_path: str) -> dict:
         if not self.key:
@@ -600,9 +605,14 @@ def build_chain(settings: dict) -> list:
 
     Providers with no key are skipped rather than failing the whole request,
     so a default config on a fresh install still works via the offline stub.
+    Entries switched off in Settings carry enabled=False and are skipped --
+    that is how a user turns a provider off without deleting its model/base
+    configuration.
     """
     chain = []
     for entry in settings.get("providers") or []:
+        if entry.get("enabled") is False:
+            continue
         if not _has_credentials(entry):
             continue
         cls = PROVIDERS.get(entry.get("kind"))

@@ -182,7 +182,9 @@ class Api:
             s, trend["current_kg"]) or 2200
         tmp = dict(s); tmp["_current_weight_kg"] = trend["current_kg"]
         targets = macronutrient_targets(target, tmp)
-        ready = [p["kind"] for p in s.get("providers", []) if _provider_ready(p)]
+        # Disabled entries must not count as ready or become active_provider.
+        ready = [p["kind"] for p in s.get("providers", [])
+                 if p.get("enabled", True) and _provider_ready(p)]
         providers = [{"kind": p["kind"], "model": p.get("model"),
                      "configured": (p["kind"] == "stub") or (_provider_ready(p) and not p.get("unreachable"))}
                     for p in s.get("providers", [])]
@@ -623,15 +625,22 @@ def _ping_request(kind, base, model):
 
 
 def _provider_ready(entry: dict) -> bool:
-    """Mirror vision._has_credentials so the UI badge matches real behavior."""
+    """Mirror vision.build_chain()'s selection so the UI badge matches what the
+    estimator will actually do: switched-off entries are never ready."""
+    if entry.get("enabled") is False:
+        return False
     from app.vision import _has_credentials
     return _has_credentials(entry)
 
 
 def _public_settings(s: dict) -> dict:
     out = dict(s)
+    # api_key is deliberately NOT included: secrets stay on the server. The UI
+    # edits kind/model/base_url/enabled only; blanking base_url falls back to
+    # the server's env-derived default.
     out["providers"] = [{"kind": p.get("kind"), "model": p.get("model"),
-                         "base_url": p.get("base_url")}
+                         "base_url": p.get("base_url"),
+                         "enabled": p.get("enabled", True)}
                         for p in s.get("providers", [])]
     return out
 

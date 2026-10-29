@@ -971,14 +971,93 @@ function renderSettings() {
   $('btn-unlock').textContent = s.calorie_target ? 'locked' : 'auto';
   syncWeightDock();
 
-  $('provider-list').innerHTML = (s.providers || []).map((p, i) => {
-    const st = (state.providers || [])[i] || {};
-    return `<div class="prov">
-      <div><div class="prov-name">${esc(p.kind)}</div><div class="prov-model">${esc(p.model || '')}</div></div>
-      <span class="badge ${st.configured ? 'on' : ''}">${st.configured ? 'ready' : 'no key'}</span>
-    </div>`;
-  }).join('');
+  renderProviders();
 }
+
+// Editable working copy of the provider chain. Kept separate from `state` so a
+// half-finished edit cannot leak into other renders, and so Cancel/reload
+// simply re-reads the saved list.
+let provDraft = null;
+
+function renderProviders() {
+  const host = $('provider-list');
+  if (!host) return;
+  const list = provDraft || (state?.settings?.providers || []);
+  if (provDraft) provDraft.forEach((p, i) => { p._status = (state?.providers || [])[i] || {}; });
+  host.innerHTML = list.map((p, i) => {
+    const st = p._status || {};
+    const known = ['qwenplan', 'groq', 'openai', 'gemini', 'ollama'].includes(p.kind);
+    return `<div class="prov-row" data-i="${i}">
+      <div class="prov-top">
+        <span class="prov-name">${esc(p.kind)}</span>
+        <span class="badge ${st.configured ? 'on' : ''}">${
+          p.enabled === false ? 'off' : st.configured ? 'ready' : known ? 'no key' : 'offline'}</span>
+        <label class="prov-en"><input type="checkbox" data-toggle="${i}" ${p.enabled === false ? '' : 'checked'}>use</label>
+        <button class="ghost tiny" data-up="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
+        <button class="ghost tiny" data-down="${i}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
+        <button class="ghost tiny prov-del" data-del="${i}" ${known ? '' : 'disabled'} aria-label="Remove">✕</button>
+      </div>
+      <div class="prov-fields">
+        <label class="fld">Model<input data-f="model" data-i="${i}" value="${esc(p.model || '')}"
+          placeholder="${known ? 'model id' : '—'}" ${known ? '' : 'disabled'}></label>
+        <label class="fld">Base URL<input data-f="base_url" data-i="${i}" value="${esc(p.base_url || '')}"
+          placeholder="from server env" ${known ? '' : 'disabled'}></label>
+      </div>
+    </div>`;
+  }).join('') || '<p class="hint">No providers — add one below.</p>';
+}
+
+$('provider-list').addEventListener('input', (e) => {
+  const inp = e.target.closest('input[data-f]'); if (!inp || !provDraft) return;
+  provDraft[+inp.dataset.i][inp.dataset.f] = inp.value.trim();
+});
+$('provider-list').addEventListener('click', (e) => {
+  if (!provDraft) return;
+  const mv = (from, to) => { const [x] = provDraft.splice(from, 1); provDraft.splice(to, 0, x); renderProviders(); };
+  const up = e.target.closest('[data-up]'), dn = e.target.closest('[data-down]'), rm = e.target.closest('[data-del]');
+  if (up) mv(+up.dataset.up, +up.dataset.up - 1);
+  else if (dn) mv(+dn.dataset.down, +dn.dataset.down + 1);
+  else if (rm && !rm.disabled) { provDraft.splice(+rm.dataset.del, 1); renderProviders(); }
+});
+$('provider-list').addEventListener('change', (e) => {
+  const t = e.target.closest('[data-toggle]'); if (!t || !provDraft) return;
+  provDraft[+t.dataset.toggle].enabled = t.checked;
+  renderProviders();
+});
+
+// Editing starts on demand: the list is read-only until "Edit" is pressed so an
+// accidental tap can't reorder the chain that decides which model answers.
+$('btn-edit-providers')?.addEventListener('click', () => {
+  provDraft = JSON.parse(JSON.stringify(state.settings.providers || []));
+  renderProviders();
+  $('btn-save-providers').hidden = false;
+  $('prov-add-wrap').hidden = false;
+});
+
+$('prov-add-kind')?.addEventListener('change', (e) => {
+  const kind = e.target.value; if (!kind || !provDraft) return;
+  if (provDraft.some(p => p.kind === kind)) { toast(kind + ' is already in the list', true); return; }
+  provDraft.push({ kind, model: '', base_url: '', enabled: true });
+  e.target.value = '';
+  renderProviders();
+});
+
+$('btn-save-providers')?.addEventListener('click', async () => {
+  if (!provDraft) return;
+  try {
+    const clean = provDraft.map(p => ({ kind: p.kind, model: p.model || undefined,
+                                        base_url: p.base_url || undefined,
+                                        enabled: p.enabled !== false }));
+    await api('settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ providers: clean }) });
+    provDraft = null;
+    $('btn-save-providers').hidden = true;
+    $('prov-add-wrap').hidden = true;
+    renderProviders();   // back to read-only view of the saved list
+    toast('Providers saved');
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+});
 
 $('btn-save').addEventListener('click', async () => {
   const imp = U.imperial;

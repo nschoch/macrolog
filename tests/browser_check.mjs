@@ -498,6 +498,43 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- Provider editor: reorder keeps each model attached to its provider,
+  // edits target the visible row, disabled entries stop being used. ----
+  await evalJson(`(() => { document.querySelector('button[data-view="settings"]').click(); })()`);
+  await sleep(500);
+  const prov = await evalJson(`(async () => {
+    await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providers: [{ kind: 'stub', model: '' },
+                                         { kind: 'qwenplan', model: 'M-A' },
+                                         { kind: 'groq', model: 'M-B' }] }) });
+    await refresh();
+    $('btn-edit-providers').click();
+    await new Promise(r => setTimeout(r, 200));
+    const out = { start: provDraft.map(p => [p.kind, p.model]) };
+    document.querySelector('.prov-row[data-i="1"] [data-down]').click();   // qwenplan -> last
+    await new Promise(r => setTimeout(r, 200));
+    out.afterMove = provDraft.map(p => [p.kind, p.model]);
+    // edit whichever row is visually first after the move
+    const inp = document.querySelector('.prov-row[data-i="0"] input[data-f="model"]');
+    out.firstKind = document.querySelector('.prov-row[data-i="0"] .prov-name').textContent;
+    inp.value = 'EDITED'; inp.dispatchEvent(new Event('input', { bubbles: true }));
+    out.afterEdit = provDraft.map(p => [p.kind, p.model]);
+    // disable stub so only the real-ish chain remains
+    const cb = document.querySelector('.prov-row[data-i="0"] input[data-toggle]');
+    cb.checked = false; cb.dispatchEvent(new Event('change', { bubbles: true }));
+    $('btn-save-providers').click();
+    await new Promise(r => setTimeout(r, 2200));
+    const st = await fetch('/api/state').then(r => r.json());
+    out.saved = st.settings.providers.map(p => [p.kind, p.model, p.enabled !== false]);
+    return JSON.stringify(out);
+  })()`);
+  const po = JSON.parse(prov);
+  check('reorder moves the whole entry (model travels with provider)',
+        JSON.stringify(po.afterMove) === JSON.stringify([['stub', ''], ['groq', 'M-B'], ['qwenplan', 'M-A']]), prov);
+  check('editing targets the visible row', po.firstKind === 'stub' && po.afterEdit[0][1] === 'EDITED', prov);
+  check('provider edits persist to the server',
+        Array.isArray(po.saved) && po.saved.length === 3 && po.saved[0][2] === false, prov);
+
   // ---- Trend view must actually paint (regression: prepCanvas returned `h`
   // while callers destructured `hh`, leaving every y-coordinate NaN so both
   // canvases drew nothing and the screen looked like empty boxes). ----------

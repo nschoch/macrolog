@@ -114,9 +114,26 @@
 
     <div class="card">
       <h3>Vision providers</h3>
-      <p class="hint">Tried top to bottom; first success wins. Keys come from environment or <code>.env</code>, never stored in the browser.</p>
+      <p class="hint">Tried top to bottom; the first one that answers wins. Drag-free
+        ↑/↓ buttons reorder them. API keys are read from the server's environment
+        only and are never sent to this device.</p>
       <div id="provider-list"></div>
-      <button class="ghost" id="btn-test">Test connection</button>
+      <label class="fld" id="prov-add-wrap" hidden>Add provider
+        <select id="prov-add-kind">
+          <option value="">choose…</option>
+          <option value="qwenplan">Qwen Token Plan (qwenplan)</option>
+          <option value="groq">Groq</option>
+          <option value="openai">OpenAI</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="ollama">Ollama (local)</option>
+          <option value="stub">Offline stub (placeholder numbers)</option>
+        </select>
+      </label>
+      <div class="sheet-btns prov-btns">
+        <button class="ghost tiny" id="btn-edit-providers">Edit providers</button>
+        <button class="ghost tiny" id="btn-test">Test connection</button>
+        <button class="primary small" id="btn-save-providers" hidden>Save providers</button>
+      </div>
       <pre class="test-out" id="test-out" hidden></pre>
     </div>
 

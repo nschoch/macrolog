@@ -235,8 +235,13 @@ def _resolved(env_model, cfg_model):
     if cfg_model is not None:
         cfg["model"] = cfg_model
     return _v.OpenAICompatProvider(cfg, "qwenplan").model
-check("env beats stored model", _resolved("qwen3.8-flash", "qwen3.8-max") == "qwen3.8-flash")
-check("stored model used when env unset", _resolved(None, "qwen3.8-max") == "qwen3.8-max")
+# Precedence: Settings-saved value > QWENPLAN_MODEL env > built-in default.
+# A UI edit must win, otherwise saving a model in Settings appears to do nothing
+# whenever the deploy sets the env var (the inverse trap also applies: env alone
+# must still work for installs that never touch the UI).
+check("stored (UI) config beats env var", _resolved("qwen3.8-flash", "qwen3.8-max") == "qwen3.8-max")
+check("env used when no stored value", _resolved("qwen3.8-flash", None) == "qwen3.8-flash")
+check("env ignored once user clears stored field", _resolved("qwen3.8-flash", "") == "qwen3.8-flash")
 check("default is the cheap flash tier", _resolved(None, None) == "qwen3.8-flash")
 # restore whatever the server process had (this is an in-proc import, so no
 # effect on the running server, but keep the test client tidy for later checks)
