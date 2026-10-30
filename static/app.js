@@ -585,7 +585,7 @@ function renderCompEditor() {
 }
 
 function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl,
-                      editingId, warning, photos, source }) {
+                      editingId, warning, photos, source, crosscheck }) {
   const e = estimate || {};
   $('review-sheet').dataset.editing = editingId || '';
   // photo = camera/label shot, text = AI from a description, manual = typed or
@@ -621,6 +621,22 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
     : (stagedForSave && stagedForSave.length) ? stagedForSave.slice()
     : (pendingPhoto ? [pendingPhoto] : []);
   if ($('btn-rescan')) $('btn-rescan').hidden = reviewPhotos.length === 0;
+
+  // Cross-check: a discriminative model's view of whether this total fits the
+  // photo. Shown only when it disagrees, so a clean estimate stays quiet.
+  const xc = $('r-crosscheck');
+  if (xc) {
+    const cc = crosscheck || null;
+    if (cc && cc.suspect) {
+      const pct = cc.plausible == null ? null : Math.round(cc.plausible * 100);
+      xc.textContent = cc.reason === 'no food visible'
+        ? 'Second opinion: this photo may not show food — double-check it.'
+        : `Second opinion: only ${pct}% likely this total fits the portion shown — check the numbers.`;
+      xc.hidden = false;
+    } else {
+      xc.hidden = true; xc.textContent = '';
+    }
+  }
 
   const src = previewUrl || photoUrl;
   img.src = src || '';

@@ -236,6 +236,9 @@
     <p class="hint" id="r-nocomp-hint" hidden>No breakdown detected — edit totals directly below.</p>
 
     <p class="hint scale-hint" id="r-scale-hint" hidden></p>
+    <!-- Second opinion from a fast discriminative model: only shown when it
+         thinks the total is wrong for the photo, so it never adds noise. -->
+    <p class="hint" id="r-crosscheck" hidden></p>
     <details class="totals-toggle" id="r-totals-wrap">
       <summary>Totals: <b id="r-total-shown">0 kcal</b></summary>
       <div class="grid4">

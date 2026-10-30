@@ -32,6 +32,7 @@ from app.database import Database
 from app.vision import (ProviderError, estimate_meal, estimate_photo,
                            estimate_text)
 from app import auth as OIDC
+from app import jev as JEVC
 
 SESSION_COOKIE = "macrolog_session"
 STATE_COOKIE = "macrolog_oidc_state"
@@ -325,6 +326,16 @@ class Api:
                # Client keeps these and hands them back on save so every photo
                # ends up attached to the meal rather than orphaned in tmp.
                "temp_photos": images}
+        # Optional second opinion: Jev is discriminative (typed questions, no
+        # free text), so it cannot produce an estimate -- but it is a fast,
+        # well-calibrated judge of whether this total is plausible for the
+        # photo. Adds ~150 ms and fails open.
+        try:
+            if images:
+                out["crosscheck"] = JEVC.crosscheck(
+                    images, meal.get("calories") or 0, meal.get("description") or "")
+        except Exception:                             # noqa: BLE001
+            pass
         errs = meal.get("_provider_errors")
         if errs:
             out["warning"] = _provider_warning(errs)
@@ -359,6 +370,12 @@ class Api:
             meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
         out = {"estimate": meal, "provider": provider, "model": model,
                "calibrated": changed, "photos": names}
+        try:
+            if paths:
+                out["crosscheck"] = JEVC.crosscheck(
+                    paths, meal.get("calories") or 0, meal.get("description") or "")
+        except Exception:                             # noqa: BLE001
+            pass
         errs = meal.get("_provider_errors")
         if errs:
             out["warning"] = _provider_warning(errs)

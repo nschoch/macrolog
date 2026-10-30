@@ -610,6 +610,11 @@ check("quick food carries its macros for one-tap re-log",
 st, qf1 = req("/api/quick-foods?limit=1")
 check("limit is honoured", len((qf1.get("foods") or [])) == 1, str(qf1)[:90])
 
+# 32. The Jev cross-check must be invisible when no key is configured.
+st, sd = req("/api/state")
+check("crosscheck field is absent without JEV_API_KEY",
+      "crosscheck" not in sd, str(sorted(sd.keys()))[:120])
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))

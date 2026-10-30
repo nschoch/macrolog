@@ -176,6 +176,25 @@ def _get_json(url: str, headers: dict, timeout: int = 45) -> dict:
         return json.loads(resp.read())
 
 
+def _structured(payload: dict, name: str) -> dict:
+    """Ask for JSON and, on hybrid reasoning models, turn thinking OFF.
+
+    Measured on a plate-of-nuts photo with qwen3.8-flash: the default reply spent
+    ~3,300 output tokens (~35 s) largely on hidden reasoning_content, while
+    json_object + enable_thinking=false returned in ~8 s with ~400 tokens and the
+    same items. That is the difference between a usable photo log and a timeout.
+    Only providers known to accept these fields get them.
+    """
+    if name == "groq":
+        return payload                  # rejects response_format outright
+    payload["response_format"] = {"type": "json_object"}
+    if name == "qwenplan":
+        # DashScope hybrid-reasoning switch; ignored (harmlessly) by models that
+        # do not reason.
+        payload["enable_thinking"] = False
+    return payload
+
+
 def _extract_json(text: str) -> dict:
     """Models sometimes wrap JSON in prose or fences; dig out the object."""
     text = text.strip()
@@ -387,10 +406,7 @@ class OpenAICompatProvider:
                  "image_url": {"url": f"data:{mime};base64,{b64}"}},
             ]}],
         }
-        # groq rejects response_format; DashScope wants the word "JSON" in the
-        # prompt (already present) and tolerates json_object on vl models.
-        if self.name not in ("groq", "qwenplan"):
-            payload["response_format"] = {"type": "json_object"}
+        payload = _structured(payload, self.name)
         data = _post(f"{self.base}/chat/completions", payload,
                      {"Authorization": f"Bearer {self.key}"})
         try:
@@ -413,8 +429,7 @@ class OpenAICompatProvider:
                             "text": "Written description of what I ate:\n" + text})
         payload = {"model": self.model, "temperature": 0.1, "max_tokens": 1500,
                    "messages": [{"role": "user", "content": content}]}
-        if self.name not in ("groq", "qwenplan"):
-            payload["response_format"] = {"type": "json_object"}
+        payload = _structured(payload, self.name)
         data = _post(f"{self.base}/chat/completions", payload,
                      {"Authorization": f"Bearer {self.key}"},
                      timeout=45 if not images else 60)
@@ -434,8 +449,7 @@ class OpenAICompatProvider:
             "messages": [{"role": "user", "content":
                           TEXT_PROMPT + "\n\nMeal description:\n" + text}],
         }
-        if self.name not in ("groq", "qwenplan"):
-            payload["response_format"] = {"type": "json_object"}
+        payload = _structured(payload, self.name)
         data = _post(f"{self.base}/chat/completions", payload,
                      {"Authorization": f"Bearer {self.key}"}, timeout=45)
         try:

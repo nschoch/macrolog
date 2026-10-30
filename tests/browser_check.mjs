@@ -556,6 +556,31 @@ try {
   check('quick-added food is recorded as manual, not an AI estimate', qk.source === 'manual', quick);
   check('quick-added food keeps its 0 kcal', qk.itemKcal === 0, quick);
 
+  // ---- Cross-check hint appears only when the second opinion objects -----
+  const xc = await evalJson(`(() => {
+    const read = (crosscheck) => {
+      openReview({ estimate: { description: 'x', calories: 300, protein: 10,
+                               carbs: 20, fat: 12, items: [] }, crosscheck });
+      const el = document.getElementById('r-crosscheck');
+      return { hidden: el.hidden, text: el.textContent };
+    };
+    const clean = read({ suspect: false, plausible: 0.71, kind: 'plate_of_food' });
+    const low = read({ suspect: true, plausible: 0.05, kind: 'plate_of_food',
+                       reason: 'total looks off for the portion shown' });
+    const noFood = read({ suspect: true, plausible: null, kind: 'not_food',
+                          reason: 'no food visible' });
+    const absent = read(null);
+    closeSheets();
+    return JSON.stringify({ clean, low, noFood, absent });
+  })()`);
+  const x = JSON.parse(xc);
+  check('cross-check stays hidden for a plausible estimate', x.clean.hidden === true, xc);
+  check('cross-check warns when the total looks wrong',
+        x.low.hidden === false && /5%/.test(x.low.text), JSON.stringify(x.low));
+  check('cross-check warns when the photo shows no food',
+        x.noFood.hidden === false && /may not show food/i.test(x.noFood.text), JSON.stringify(x.noFood));
+  check('cross-check absent when disabled', x.absent.hidden === true, xc);
+
   // ---- Rescan button: re-run the model on the same photo ----------------
   const rescan = await evalJson(`(async () => {
     viewDate = '';
