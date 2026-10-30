@@ -146,9 +146,14 @@ check("export carries no api keys", "api_key" not in json.dumps(xp).lower())
 st, d = req(f"/api/meals/{meal_id}", "DELETE")
 check("delete meal 200", st == 200, str(d)[:100])
 
-# 11. bad input rejected
-st, _ = req("/api/meals", "POST", {"calories": 0, "description": "empty"})
-check("zero-calorie meal rejected", st == 400, str(st))
+# 11. bad input rejected. NOTE: 0 kcal is now VALID (supplements) as long as the
+# entry carries a description or components; only a truly empty one is refused.
+st, _ = req("/api/meals", "POST", {"calories": 0})
+check("empty calorie-less meal rejected", st == 400, str(st))
+st, zc = req("/api/meals", "POST", {"calories": 0, "description": "creatine", "source": "manual"})
+check("0 kcal with a description is accepted", st in (200, 201), str(zc)[:80])
+if zc.get("id"):
+    req(f"/api/meals/{zc['id']}", "DELETE")
 
 # ---- components / items ---------------------------------------------------
 # 12. create a meal WITH components; totals must equal sum of components
@@ -474,7 +479,8 @@ def req_tz(path, method="GET", body=None, tz="America/Los_Angeles"):
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
 
-today_pt = _dt6.datetime.now(PT).date().isoformat()
+# A fixed past date keeps these meals out of any other test's grouping window.
+today_pt = "2026-01-15"
 made = []
 for hm, kcal in (("07:25", 90), ("12:35", 400), ("19:10", 700)):
     st, out = req_tz("/api/meals", "POST", {
@@ -483,7 +489,7 @@ for hm, kcal in (("07:25", 90), ("12:35", 400), ("19:10", 700)):
     made.append((out.get("id"), hm))
     check(f"meal at {hm} accepted", st in (200, 201) and out.get("id"), str(st))
 
-st, sd = req_tz("/api/state")
+st, sd = req_tz("/api/state?date=" + today_pt)
 byid = {m["id"]: m for m in sd.get("meals", [])}
 offsets = []
 for mid, hm in made:
@@ -504,7 +510,7 @@ check("19:10 groups as Dinner", groups.get(made[2][0]) == "Dinner", str(groups))
 
 # The same rows read from another zone must shift by 8h, proving the zone is
 # per-request rather than baked into the stored data.
-st, sd_ldn = req_tz("/api/state", tz="Europe/London")
+st, sd_ldn = req_tz("/api/state?date=" + today_pt, tz="Europe/London")
 london = {m["id"]: m for m in sd_ldn.get("meals", [])}
 LDN = _ZI("Europe/London")
 lunch_ts = byid[made[1][0]]["ts"]
@@ -570,6 +576,39 @@ st, r3 = req("/api/rescan", "POST", {"photos": ["nope-missing.jpg"]})
 check("rescan with no usable photo -> 400", st == 400, str(r3)[:100])
 st, r4 = req("/api/rescan", "POST", {"photos": ["../../etc/passwd"]})
 check("rescan refuses path traversal", st == 400, str(r4)[:100])
+
+# 30. Zero-calorie entries (supplements) are legitimate.
+st, z1 = req("/api/meals", "POST", {"description": "Creatine", "calories": 0, "source": "manual",
+    "items": [{"name": "Creatine", "grams": 5, "calories": 0, "protein": 0, "carbs": 0, "fat": 0}]})
+check("0 kcal entry with a component saves", st in (200, 201) and z1.get("id"), str(z1)[:90])
+st, z2 = req("/api/meals", "POST", {"description": "Black coffee", "calories": 0, "source": "manual"})
+check("0 kcal entry with only a description saves", st in (200, 201), str(z2)[:90])
+st, z3 = req("/api/meals", "POST", {"calories": 0, "source": "manual"})
+check("a completely empty entry is still rejected", st == 400, str(z3)[:90])
+st, z4 = req("/api/meals", "POST", {"description": "x", "calories": -5, "source": "manual"})
+check("negative calories rejected with its own message",
+      st == 400 and "negative" in str(z4.get("error")), str(z4)[:90])
+for zid in (z1.get("id"), z2.get("id")):
+    if zid: req(f"/api/meals/{zid}", "DELETE")
+
+# 31. Quick foods: most-logged components, with their latest macros.
+for _ in range(3):
+    req("/api/meals", "POST", {"description": "Sunfiber", "calories": 0, "source": "manual",
+        "items": [{"name": "Sunfiber", "grams": 7, "calories": 0, "protein": 0,
+                   "carbs": 7, "fat": 0, "fiber": 7}]})
+req("/api/meals", "POST", {"description": "Oats", "calories": 150, "protein": 5,
+    "carbs": 27, "fat": 3, "fiber": 4, "source": "manual",
+    "items": [{"name": "Oats", "grams": 40, "calories": 150, "protein": 5,
+               "carbs": 27, "fat": 3, "fiber": 4}]})
+st, qf = req("/api/quick-foods?limit=10")
+foods = qf.get("foods") or []
+check("quick foods returns entries", st == 200 and len(foods) >= 2, str(foods)[:120])
+check("most-logged food comes first", foods and foods[0]["name"] == "Sunfiber", str(foods[0])[:90])
+check("uses count is reported", foods and foods[0]["uses"] >= 3, str(foods[0])[:90])
+check("quick food carries its macros for one-tap re-log",
+      foods and foods[0]["grams"] == 7.0 and foods[0]["fiber"] == 7.0, str(foods[0])[:120])
+st, qf1 = req("/api/quick-foods?limit=1")
+check("limit is honoured", len((qf1.get("foods") or [])) == 1, str(qf1)[:90])
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

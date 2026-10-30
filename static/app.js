@@ -585,11 +585,13 @@ function renderCompEditor() {
 }
 
 function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl,
-                      editingId, warning, photos }) {
+                      editingId, warning, photos, source }) {
   const e = estimate || {};
   $('review-sheet').dataset.editing = editingId || '';
-  // 'photo' covers camera shots; typed descriptions have no image.
-  $('review-sheet').dataset.source = previewUrl || photoUrl ? 'photo' : 'text';
+  // photo = camera/label shot, text = AI from a description, manual = typed or
+  // re-logged from history (no model call).
+  $('review-sheet').dataset.source = source
+    || (previewUrl || photoUrl ? 'photo' : 'text');
   $('r-desc').value = e.description || '';
   compItems = (e.items || []).map(i => {
     const copy = { ...i };
@@ -775,7 +777,7 @@ $('btn-save-review').addEventListener('click', async () => {
     kind: $('r-kind').value,
     date: $('r-date').value || viewDate || undefined,
     time: $('r-time').value || undefined,
-    source: $('review-sheet').dataset.source === 'text' ? 'text' : 'photo',
+    source: $('review-sheet').dataset.source || 'photo',
   };
   if (cleanComps.length) {
     payload.items = cleanComps;
@@ -789,7 +791,11 @@ $('btn-save-review').addEventListener('click', async () => {
     payload.fat = Number($('r-fat').value) || 0;
     payload.fiber = Number($('r-fib') ? $('r-fib').value : 0) || 0;
   }
-  if (payload.calories <= 0) { toast('Calories must be above zero', true); return; }
+  // 0 kcal is fine for supplements; refuse only a completely empty entry.
+  if (payload.calories < 0) { toast('Calories cannot be negative', true); return; }
+  if (!payload.calories && !payload.description && !cleanComps.length) {
+    toast('Add a description or at least one component', true); return;
+  }
 
   const editingId = $('review-sheet').dataset.editing;
   try {
@@ -833,7 +839,10 @@ $('btn-save-manual').addEventListener('click', async () => {
     source: 'manual',
     date: viewDate || undefined,
   };
-  if (payload.calories <= 0) { toast('Calories must be above zero', true); return; }
+  if (payload.calories < 0) { toast('Calories cannot be negative', true); return; }
+  if (!payload.calories && !payload.description) {
+    toast('Add a description for a 0 kcal entry', true); return;
+  }
   try {
     await api('meals', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -864,6 +873,43 @@ function renderTray() {
       '<p class="hint tray-empty">No photos yet — the food itself or its nutrition label both work.</p>');
 }
 
+let quickFoods = [];
+
+// Foods this user logs most often, from their own history. Loaded when the Add
+// sheet opens; tapping one opens the review prefilled, with no model call.
+async function loadQuickFoods() {
+  const wrap = $('quick-wrap'), host = $('quick-chips');
+  if (!wrap || !host) return;
+  try {
+    const data = await api('quick-foods?limit=10');
+    quickFoods = data.foods || [];
+    host.innerHTML = quickFoods.map((f, i) => `
+      <button class="chip" data-qf="${i}">${esc(f.name)}<small>${fmt(f.calories)} kcal</small></button>`
+    ).join('');
+    wrap.hidden = quickFoods.length === 0;
+  } catch (_) {
+    wrap.hidden = true;      // a failed lookup must never block manual logging
+  }
+}
+
+$('quick-chips').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-qf]');
+  if (!b) return;
+  const f = quickFoods[+b.dataset.qf];
+  if (!f) return;
+  const item = { name: f.name, grams: f.grams, calories: f.calories,
+                 protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber };
+  clearStaged();
+  stagedForSave = [];
+  $('add-sheet').hidden = true;
+  openReview({
+    estimate: { description: f.name, items: [item], calories: f.calories,
+                protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber },
+    source: 'manual',
+  });
+  toast(`${f.name} — check the portion`);
+});
+
 function clearStaged() {
   for (const ph of stagedPhotos) {
     if (ph.url.startsWith('blob:') && URL.revokeObjectURL) URL.revokeObjectURL(ph.url);
@@ -883,6 +929,7 @@ function openAddSheet() {
   $('add-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
   renderTray();
+  loadQuickFoods();
 }
 
 $('btn-add-meal').addEventListener('click', openAddSheet);

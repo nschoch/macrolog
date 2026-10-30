@@ -150,6 +150,16 @@ input, select, button { font: inherit; color: inherit; }
   justify-content: space-between; gap: 6px; }
 .macro-sub b { color: #a3e635; font-weight: 600; }
 
+/* ------------------------------------------------------- quick-add chips */
+.quick-wrap { margin: 2px 0 12px; }
+.quick-head { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); margin-bottom: 6px; }
+.quick-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  border-radius: 999px; padding: 7px 12px; font-size: 12.5px; line-height: 1; }
+.chip small { color: var(--muted); margin-left: 5px; font-size: 11px; }
+.chip:active { border-color: var(--accent-dim); }
+
 /* ------------------------------------------------------------- day nav */
 .day-nav { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 4px 0 2px; }
 .day-nav h2 { font-size: 15px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); min-width: 132px; text-align: center; }

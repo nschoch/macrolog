@@ -512,6 +512,50 @@ try {
   check('staged photos do not persist either', reset.staged === 0 && reset.forSave === 0,
         JSON.stringify(reset));
 
+  // ---- Zero-calorie entries + frequently-logged quick add ----------------
+  const quick = await evalJson(`(async () => {
+    viewDate = '';
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    // Log a supplement with 0 kcal through the review sheet, as a user would.
+    openReview({ estimate: { description: 'Creatine', calories: 0, protein: 0, carbs: 0,
+                             fat: 0, items: [{ name: 'Creatine', grams: 5, calories: 0,
+                             protein: 0, carbs: 0, fat: 0, fiber: 0 }] }, source: 'manual' });
+    document.getElementById('btn-save-review').click();
+    await new Promise(r => setTimeout(r, 2500));
+    const st = await fetch('/api/state').then(r => r.json());
+    const saved = st.meals.find(m => m.description === 'Creatine');
+    const out = { savedZeroKcal: !!saved && saved.calories === 0 };
+
+    // The Add sheet should now offer it as a quick-add chip.
+    document.getElementById('add-sheet').hidden = true;
+    openAddSheet();
+    await new Promise(r => setTimeout(r, 1200));
+    const chips = [...document.querySelectorAll('#quick-chips .chip')];
+    out.chipCount = chips.length;
+    out.chipText = chips.length ? chips[0].textContent : '';
+    out.sheetVisible = !document.getElementById('quick-wrap').hidden;
+    if (chips.length) {
+      chips[0].click();
+      await new Promise(r => setTimeout(r, 400));
+      out.reviewOpen = !document.getElementById('review-sheet').hidden;
+      out.source = document.getElementById('review-sheet').dataset.source;
+      out.itemName = (compItems[0] || {}).name;
+      out.itemGrams = (compItems[0] || {}).grams;
+      out.itemKcal = (compItems[0] || {}).calories;
+    }
+    closeSheets();
+    if (saved) await fetch('/api/meals/' + saved.id, { method: 'DELETE' });
+    return JSON.stringify(out);
+  })()`);
+  const qk = JSON.parse(quick);
+  check('a 0 kcal entry saves (supplements)', qk.savedZeroKcal === true, quick);
+  check('frequently logged foods appear in the Add sheet', qk.chipCount >= 1 && qk.sheetVisible === true, quick);
+  check('chip opens the review prefilled without a model call',
+        qk.reviewOpen === true && qk.itemName === 'Creatine' && qk.itemGrams === 5, quick);
+  check('quick-added food is recorded as manual, not an AI estimate', qk.source === 'manual', quick);
+  check('quick-added food keeps its 0 kcal', qk.itemKcal === 0, quick);
+
   // ---- Rescan button: re-run the model on the same photo ----------------
   const rescan = await evalJson(`(async () => {
     viewDate = '';

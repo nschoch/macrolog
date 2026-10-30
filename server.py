@@ -419,10 +419,18 @@ class Api:
         # of truth); otherwise fall back to the flat totals the client sent.
         if items:
             meal.update(_sum_items(items))
-        if meal["calories"] <= 0:
+        # Zero-calorie entries are legitimate (creatine, sunfiber, black coffee,
+        # supplements). Only reject when there is nothing at all to record.
+        has_content = bool(str(meal.get("description") or "").strip()) or bool(items)
+        if meal["calories"] < 0:
             if photo and os.path.exists(photo):
                 os.remove(photo)
-            return 400, {"error": "calories must be > 0"}
+            return 400, {"error": "calories cannot be negative"}
+        if meal["calories"] == 0 and not has_content:
+            if photo and os.path.exists(photo):
+                os.remove(photo)
+            return 400, {"error": "add a description or components "
+                                  "(calories may be 0 for supplements)"}
         # Accept several photos (e.g. the plate AND its Nutrition Facts label):
         # `photos` is a list, `photo_path` a single temp file for older clients.
         tmp_list = [str(x) for x in (body.get("photos") or []) if x]
@@ -560,6 +568,49 @@ class Api:
             "exercise": [{"date": r["date"], "calories": round(r["c"] or 0)} for r in ex],
             "accuracy": accuracy_summary(db, owner),
         }
+
+    @staticmethod
+    def GET_quick_foods(h, q, body):
+        """Foods this user logs most often, for one-tap re-logging.
+
+        Derived from their own meal_items history rather than a favourites
+        table: supplements and staples reappear on their own, so there is
+        nothing extra to curate. Each entry carries the macros of its most
+        recent occurrence, so re-adding reproduces what was logged last time.
+        """
+        owner = getattr(h, "owner", "default")
+        try:
+            limit = max(1, min(20, int((q.get("limit") or ["10"])[0])))
+        except ValueError:
+            limit = 10
+        try:
+            top = db.query(
+                "SELECT MIN(mi.name) AS name, COUNT(*) AS uses, MAX(m.ts) AS last_ts "
+                "FROM meal_items mi JOIN meals m ON m.id = mi.meal_id "
+                "WHERE m.owner=? AND TRIM(mi.name) != '' "
+                "GROUP BY LOWER(TRIM(mi.name)) "
+                "ORDER BY uses DESC, last_ts DESC LIMIT ?", (owner, limit))
+        except Exception:                                  # noqa: BLE001
+            return 200, {"foods": []}
+        foods = []
+        for row in top:
+            latest = db.one(
+                "SELECT mi.name, mi.grams, mi.calories, mi.protein, mi.carbs, "
+                "mi.fat, mi.fiber FROM meal_items mi JOIN meals m ON m.id = mi.meal_id "
+                "WHERE m.owner=? AND LOWER(TRIM(mi.name)) = LOWER(TRIM(?)) "
+                "ORDER BY m.ts DESC, mi.id DESC LIMIT 1", (owner, row["name"]))
+            if not latest:
+                continue
+            foods.append({
+                "name": latest["name"], "grams": round(latest["grams"] or 0, 1),
+                "calories": round(latest["calories"] or 0, 1),
+                "protein": round(latest["protein"] or 0, 1),
+                "carbs": round(latest["carbs"] or 0, 1),
+                "fat": round(latest["fat"] or 0, 1),
+                "fiber": round((latest["fiber"] if "fiber" in latest.keys() else 0) or 0, 1),
+                "uses": row["uses"],
+            })
+        return 200, {"foods": foods}
 
     @staticmethod
     def POST_exercise(h, q, body):
@@ -1257,6 +1308,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.POST_estimate_text(self, q, body)
             elif resource == "estimate-meal" and verb == "POST":
                 st, pl = Api.POST_estimate_meal(self, q, body)
+            elif resource == "quick-foods" and verb == "GET":
+                st, pl = Api.GET_quick_foods(self, q, body)
             elif resource == "rescan" and verb == "POST":
                 st, pl = Api.POST_rescan(self, q, body)
             elif resource == "meals" and verb == "POST":
