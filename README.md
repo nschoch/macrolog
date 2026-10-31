@@ -44,7 +44,7 @@ Requires Python 3.9+. No pip installs needed to run (Pillow is optional).
 
 ```bash
 git clone https://github.com/nschoch/macrolog && cd macrolog
-cp .env.example .env          # add a vision key (see below)
+cp .env.example .env          # optional server-side key; you can also add one in Settings
 python3 server.py             # → http://localhost:8765
 ```
 
@@ -52,15 +52,44 @@ Open it on your phone by running with `--host 0.0.0.0` and visiting the LAN/
 Netbird address it prints. In mobile Safari, **Add to Home Screen** for a
 full-screen app with camera access.
 
-### Getting a vision key
+### Getting an AI provider
 
-The photo→calories step needs a multimodal model. Pick one:
+The photo→calories step needs a multimodal model. Provider settings are
+**per user**: open **Settings → AI provider**, add a provider, paste your key,
+then choose a model. Each account has its own chain, so a new family member does
+not inherit (or spend) someone else's key. With no provider configured, the app
+uses an offline placeholder so you can still evaluate the whole UX.
 
-- **Qwen Token Plan** *(default first provider)* — set `QWENPLAN_API_KEY` (an
-  `sk-…` key from [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com))
-  and, if your plan uses a custom host, `QWENPLAN_BASE_URL`. Uses `qwen3.8-max`,
-  which reads images directly. Note: these Token Plans often expose *no*
-  `qwen-vl-*` model — the multimodal text models (qwen3.8-max / -flash) work fine.
+**Sharing a connection with everyone.** Edit one of your providers and tick
+**Share this connection with everyone on this server**. It is appended after
+each user's own providers and used as a fallback when their own connections are
+missing or fail. Shared connections use the sharer's key and quota, are
+read-only for everyone else, and only the sharer can edit or unshare them.
+Recipients never receive the key. This is the intended way to let a family share
+one paid key without putting it in `.env`.
+
+The easiest path is **OpenRouter**:
+
+1. Create a key at [openrouter.ai/keys](https://openrouter.ai/keys).
+2. In **Settings → AI provider**, choose **OpenRouter**, paste the key, and press
+   **Load**. The picker asks OpenRouter for its model list and keeps only models
+   that accept image input (batch-only variants are hidden).
+3. Pick a model and save. `qwen/qwen3.8-flash` is a cheap vision-capable choice;
+   model IDs and prices are shown in the picker. You can also paste an exact ID
+   if the list request fails.
+
+You can also add a preset for Qwen Token Plan, Groq, OpenAI, Google Gemini,
+Ollama, or any custom OpenAI-compatible endpoint. Server-wide environment keys
+are still supported as fallbacks: a key in `.env` only backs a provider after
+that provider is added in Settings.
+
+- **OpenRouter** — `OPENROUTER_API_KEY`; optional `OPENROUTER_BASE_URL` and
+  `OPENROUTER_MODEL`. Defaults to `https://openrouter.ai/api/v1`.
+- **Qwen Token Plan** — `QWENPLAN_API_KEY` (an `sk-…` key from
+  [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com)) and, if
+  your plan uses a custom host, `QWENPLAN_BASE_URL`. These Token Plans often
+  expose *no* `qwen-vl-*` model — the multimodal text models (`qwen3.8-flash` /
+  `qwen3.8-max`) read images fine.
 - **Groq** *(free, no card)* — grab a key at
   [console.groq.com/keys](https://console.groq.com/keys), set `GROQ_API_KEY`.
   Serves Llama 4 Scout (vision).
@@ -69,12 +98,18 @@ The photo→calories step needs a multimodal model. Pick one:
   ([open issue](https://discuss.ai.google.dev/t/gemini-api-returns-401-access-token-type-unsupported-with-valid-aq-key/188360));
   you need a legacy `AIza…` key.
 - **OpenAI** — set `OPENAI_API_KEY`, uses `gpt-4o-mini` (~$0.005/meal).
+- **DeepSeek direct** — add a **custom OpenAI-compatible** provider with base
+  `https://api.deepseek.com`, model `deepseek-flash`, and your DeepSeek key. It
+  accepts images. FoodLogger turns hidden reasoning off for DeepSeek
+  automatically; otherwise a reasoning model can spend the whole token budget
+  on `reasoning_content` and return empty JSON.
 - **Ollama** *(fully offline)* — run `ollama pull llama3.2-vision` and set
   `OLLAMA_HOST`. No account, no network egress, weaker portion estimates.
 
-Providers are tried top-to-bottom; the first with a working key wins. With **no
-key at all** the app still runs on an offline placeholder estimator, so you can
-evaluate the whole UX before wiring anything up.
+Providers are tried top-to-bottom and the first one that answers wins. Keys are
+stored per user in `data/macrolog.sqlite`, are never returned to the browser after
+saving, and are excluded from JSON exports. Enter keys over HTTPS (Caddy in
+front, or `--tls-cert` / `--tls-key`) so the browser-to-server hop is encrypted.
 
 ### Optional: sign-in with OIDC (Pocket ID / Authelia / Authentik)
 
@@ -84,7 +119,7 @@ provider and give each family member their own private log, set in `.env`:
 ```bash
 OIDC_ISSUER=https://auth.yourdomain.com      # provider root; discovery is auto
 OIDC_CLIENT_ID=<from Pocket ID client>
-OIDC_CLIENT_SECRET=***                      # optional for PKCE public clients
+OIDC_CLIENT_SECRET=<from Pocket ID client>  # optional for PKCE public clients
 # pip install cryptography   # required for RS256 id_token verification
 ```
 
@@ -164,10 +199,10 @@ Everything is editable after the fact, and every edit feeds loop #2.
 server.py            stdlib HTTP server + JSON API (no framework)
 app/
   database.py        SQLite schema + helpers (WAL, thread-safe writes)
-  vision.py          provider layer: qwenplan / groq / gemini / openai / ollama / stub
+  vision.py          provider layer: openrouter / custom / qwenplan / groq / gemini / openai / ollama / stub
   adaptive.py        weight→target loop + estimate calibration + food groups
 static/              mobile-first PWA (vanilla JS, no build step)
-tests/api_test.py    21 end-to-end API checks
+tests/api_test.py    end-to-end API checks
 deploy/              provision.sh, systemd unit, Dockerfile
 data/                runtime: sqlite + photos (gitignored — this is your backup)
 ```
@@ -175,7 +210,9 @@ data/                runtime: sqlite + photos (gitignored — this is your backu
 ## Backups & privacy
 
 Back up by copying `data/`. Photos stay on your machine; only the image bytes go
-to whichever vision provider you configure. Nothing else leaves your network.
+to whichever provider you configure. Provider keys live in that same SQLite
+file (per user), are never sent back to the browser after saving, and are
+excluded from JSON exports. Nothing else leaves your network.
 
 ## Status
 

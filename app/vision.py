@@ -282,9 +282,11 @@ class GeminiProvider:
     name = "gemini"
 
     def __init__(self, cfg: dict):
-        self.key = cfg.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
-        self.model = cfg.get("model", "gemini-2.5-flash")
-        self.base = cfg.get("base_url", "https://generativelanguage.googleapis.com")
+        self.key = str(cfg.get("api_key") or
+                       os.environ.get("GEMINI_API_KEY", "")).strip()
+        self.model = str(cfg.get("model") or "gemini-2.5-flash").strip()
+        self.base = str(cfg.get("base_url") or
+                        "https://generativelanguage.googleapis.com").rstrip("/")
 
     def estimate(self, image_path: str) -> dict:
         if not self.key:
@@ -354,47 +356,108 @@ class GeminiProvider:
         return _extract_json("".join(p.get("text", "") for p in parts))
 
 
+openai_compat_defaults = {
+    "groq": ("https://api.groq.com/openai/v1",
+             "meta-llama/llama-4-scout-17b-16e-instruct"),
+    "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
+    # Qwen Token Plan ("qwenplan"): DashScope-compatible OpenAI endpoint.
+    # Override host with QWENPLAN_BASE_URL (token-plan.maas.* hosts vary by region).
+    "qwenplan": ("https://dashscope.aliyuncs.com/compatible-mode/v1",
+                 "qwen3.8-flash"),
+    "openrouter": ("https://openrouter.ai/api/v1", "qwen/qwen3.8-flash"),
+    # Custom endpoints have no sensible default: the user must supply both.
+    "custom": ("", ""),
+}
+
+openai_compat_env_keys = {
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "qwenplan": "QWENPLAN_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+openai_compat_env_models = {
+    "qwenplan": "QWENPLAN_MODEL",
+    "openrouter": "OPENROUTER_MODEL",
+}
+
+openai_compat_env_bases = {
+    "qwenplan": "QWENPLAN_BASE_URL",
+    "openrouter": "OPENROUTER_BASE_URL",
+}
+
+
 class OpenAICompatProvider:
     """Any OpenAI-compatible /chat/completions endpoint that accepts images.
 
-    Covers OpenAI, Groq, and Alibaba DashScope Token Plan (Qwen). The
-    `base_url` and `env_key` args let a provider opt into a different host and
-    credential variable without subclassing.
+    Covers OpenAI, Groq, OpenRouter, Alibaba DashScope Token Plan (Qwen), and
+    user-supplied endpoints. Stored settings beat env vars, which beat the
+    built-in defaults -- the Settings UI must not be silently ignored.
     """
 
     def __init__(self, cfg: dict, name: str = "openai"):
         self.name = name
-        env_var = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY",
-                   "qwenplan": "QWENPLAN_API_KEY"}.get(name, f"{name.upper()}_API_KEY")
-        self.key = cfg.get("api_key") or os.environ.get(env_var, "")
-        defaults = {
-            "groq": ("https://api.groq.com/openai/v1", "meta-llama/llama-4-scout-17b-16e-instruct"),
-            "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
-                        # Qwen Token Plan ("qwenplan"): DashScope-compatible OpenAI endpoint.
-            # Override host with QWENPLAN_BASE_URL (token-plan.maas.* hosts vary by region).
-            "qwenplan": (os.environ.get("QWENPLAN_BASE_URL")
-                     or "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                     os.environ.get("QWENPLAN_MODEL", "qwen3.8-flash")),
-        }
-        base, model = defaults.get(name, ("", "gpt-4o-mini"))
-        # Precedence, most explicit first:
-        #   1. value saved from the Settings UI (a deliberate user choice)
-        #   2. QWENPLAN_* env vars (operator/deploy-time default)
-        #   3. built-in default
-        # Env used to outrank stored config so that editing .env took effect
-        # immediately; but the Settings UI writes stored config, which would
-        # then be silently ignored -- the same "it changed nothing" failure seen
-        # from the other side. Deploy-time env is now only a fallback.
-        stored_model = (cfg.get("model") or "").strip()
-        stored_base = (cfg.get("base_url") or "").strip()
-        env_model = os.environ.get("QWENPLAN_MODEL", "") if name == "qwenplan" else ""
-        env_base = os.environ.get("QWENPLAN_BASE_URL", "") if name == "qwenplan" else ""
+        env_var = openai_compat_env_keys.get(name, "")
+        self.key = str(cfg.get("api_key") or
+                       (os.environ.get(env_var, "") if env_var else "")).strip()
+        base, model = openai_compat_defaults.get(name, ("", ""))
+        stored_model = str(cfg.get("model") or "").strip()
+        stored_base = str(cfg.get("base_url") or "").strip()
+        env_model = os.environ.get(openai_compat_env_models.get(name, ""), "")
+        env_base = os.environ.get(openai_compat_env_bases.get(name, ""), "")
         self.model = stored_model or env_model or model
         self.base = (stored_base or env_base or base).rstrip("/")
+        # DeepSeek's reasoning variants can consume the whole token budget on
+        # hidden reasoning and return an empty content field, which breaks the
+        # JSON contract. Meal estimates want speed and JSON, not chain-of-
+        # thought, so opt out by default. A config value can override this.
+        self.reasoning_effort = str(cfg.get("reasoning_effort") or "").strip().lower()
+        if not self.reasoning_effort:
+            host = self.base.lower()
+            deepseek = (self.name == "custom" and
+                        ("deepseek" in host or self.model.startswith("deepseek"))) or \
+                       (self.name == "openrouter" and self.model.startswith(("deepseek/", "~deepseek/")))
+            if deepseek:
+                self.reasoning_effort = "none"
+
+    def _headers(self) -> dict:
+        headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        if self.name == "openrouter":
+            # OpenRouter uses these only for attribution/analytics; they are not
+            # credentials and are safe to send from a self-hosted app.
+            headers.setdefault("X-Title", "MacroLog")
+            headers.setdefault("HTTP-Referer", "https://github.com/nschoch/macrolog")
+        return headers
+
+    def _chat(self, payload: dict, timeout: int = 90) -> dict:
+        """POST /chat/completions, retrying without JSON-mode fields on 400/422.
+
+        OpenRouter and custom gateways front hundreds of models; some reject
+        ``response_format`` even though the rest of the OpenAI contract works.
+        Retrying once without the optional fields turns a hard failure into a
+        plain-text JSON reply that ``_extract_json`` can still parse.
+        """
+        payload = _structured(payload, self.name)
+        if self.reasoning_effort:
+            payload.setdefault("reasoning_effort", self.reasoning_effort)
+        url = f"{self.base}/chat/completions"
+        try:
+            return _post(url, payload, self._headers(), timeout=timeout)
+        except ProviderError as e:
+            if self.name not in ("openrouter", "custom"):
+                raise
+            if not str(e).startswith(("HTTP 400", "HTTP 422")):
+                raise
+            payload.pop("response_format", None)
+            payload.pop("enable_thinking", None)
+            payload.pop("reasoning_effort", None)
+            return _post(url, payload, self._headers(), timeout=timeout)
 
     def estimate(self, image_path: str) -> dict:
-        if not self.key:
+        if not self.key and self.name != "custom":
             raise ProviderError(f"{self.name} API key not set")
+        if not self.base:
+            raise ProviderError(f"{self.name} base URL not set")
         b64, mime = encode_image(image_path)
         payload = {
             "model": self.model,
@@ -406,9 +469,7 @@ class OpenAICompatProvider:
                  "image_url": {"url": f"data:{mime};base64,{b64}"}},
             ]}],
         }
-        payload = _structured(payload, self.name)
-        data = _post(f"{self.base}/chat/completions", payload,
-                     {"Authorization": f"Bearer {self.key}"})
+        data = self._chat(payload)
         try:
             text = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
@@ -417,8 +478,10 @@ class OpenAICompatProvider:
 
     def estimate_meal(self, images: list[str], text: str | None = None) -> dict:
         """One or more food/label photos plus an optional description."""
-        if not self.key:
+        if not self.key and self.name != "custom":
             raise ProviderError(f"{self.name} API key not set")
+        if not self.base:
+            raise ProviderError(f"{self.name} base URL not set")
         content: list[dict] = [{"type": "text", "text": MEAL_PROMPT}]
         for path in images:
             b64, mime = encode_image(path)
@@ -429,10 +492,7 @@ class OpenAICompatProvider:
                             "text": "Written description of what I ate:\n" + text})
         payload = {"model": self.model, "temperature": 0.1, "max_tokens": 1500,
                    "messages": [{"role": "user", "content": content}]}
-        payload = _structured(payload, self.name)
-        data = _post(f"{self.base}/chat/completions", payload,
-                     {"Authorization": f"Bearer {self.key}"},
-                     timeout=45 if not images else 60)
+        data = self._chat(payload, timeout=45 if not images else 60)
         try:
             out = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
@@ -440,8 +500,10 @@ class OpenAICompatProvider:
         return _extract_json(out)
 
     def estimate_text(self, text: str) -> dict:
-        if not self.key:
+        if not self.key and self.name != "custom":
             raise ProviderError(f"{self.name} API key not set")
+        if not self.base:
+            raise ProviderError(f"{self.name} base URL not set")
         payload = {
             "model": self.model,
             "temperature": 0.1,
@@ -449,9 +511,7 @@ class OpenAICompatProvider:
             "messages": [{"role": "user", "content":
                           TEXT_PROMPT + "\n\nMeal description:\n" + text}],
         }
-        payload = _structured(payload, self.name)
-        data = _post(f"{self.base}/chat/completions", payload,
-                     {"Authorization": f"Bearer {self.key}"}, timeout=45)
+        data = self._chat(payload, timeout=45)
         try:
             out = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
@@ -465,9 +525,10 @@ class OllamaProvider:
     name = "ollama"
 
     def __init__(self, cfg: dict):
-        self.base = cfg.get("base_url",
-                            os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")).rstrip("/")
-        self.model = cfg.get("model", "llama3.2-vision:11b")
+        self.base = str(cfg.get("base_url") or
+                        os.environ.get("OLLAMA_HOST",
+                                       "http://127.0.0.1:11434")).rstrip("/")
+        self.model = str(cfg.get("model") or "llama3.2-vision:11b").strip()
 
     def estimate(self, image_path: str) -> dict:
         b64, _ = encode_image(image_path)
@@ -582,9 +643,61 @@ PROVIDERS = {
     "openai": lambda cfg: OpenAICompatProvider(cfg, "openai"),
     "groq": lambda cfg: OpenAICompatProvider(cfg, "groq"),
     "qwenplan": lambda cfg: OpenAICompatProvider(cfg, "qwenplan"),
+    "openrouter": lambda cfg: OpenAICompatProvider(cfg, "openrouter"),
+    "custom": lambda cfg: OpenAICompatProvider(cfg, "custom"),
     "ollama": OllamaProvider,
     "stub": StubProvider,
 }
+
+# Kinds the Settings UI may save. Keep this in sync with PROVIDERS: a kind with
+# no class is harmless but confusing, and an unknown string is never executed.
+PROVIDER_KINDS = tuple(PROVIDERS)
+
+
+def provider_env_key(kind: str) -> str:
+    """Server-side env var that can back this provider kind, or ''."""
+    if kind == "gemini":
+        return "GEMINI_API_KEY"
+    return openai_compat_env_keys.get(kind, "")
+
+
+def provider_default_base(kind: str) -> str:
+    """Built-in / env / explicit default base URL for a provider kind."""
+    if kind == "gemini":
+        return "https://generativelanguage.googleapis.com"
+    if kind == "ollama":
+        return os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    env_name = openai_compat_env_bases.get(kind, "")
+    if env_name and os.environ.get(env_name):
+        return os.environ[env_name].rstrip("/")
+    return openai_compat_defaults.get(kind, ("", ""))[0].rstrip("/")
+
+
+def provider_default_model(kind: str) -> str:
+    """Built-in / env / explicit default model for a provider kind."""
+    if kind == "gemini":
+        return "gemini-2.5-flash"
+    if kind == "ollama":
+        return "llama3.2-vision:11b"
+    env_name = openai_compat_env_models.get(kind, "")
+    if env_name and os.environ.get(env_name):
+        return os.environ[env_name]
+    return openai_compat_defaults.get(kind, ("", ""))[1]
+
+
+def provider_key_source(entry: dict) -> str | None:
+    """Where a usable key comes from: 'saved', 'env', or None.
+
+    The UI uses this to distinguish the user's own key from one the operator
+    exposed in the server environment; both are usable, but only the former can
+    be cleared from Settings.
+    """
+    if entry.get("api_key"):
+        return "saved"
+    env = provider_env_key(entry.get("kind", ""))
+    if env and os.environ.get(env):
+        return "env"
+    return None
 
 
 _OLLAMA_REACH_CACHE = {"ts": 0.0, "ok": False}
@@ -612,10 +725,14 @@ def _has_credentials(entry: dict) -> bool:
     kind = entry.get("kind")
     if kind == "stub":
         return True
+    if kind == "custom":
+        # Local OpenAI-compatible servers often have no auth layer. The base URL
+        # is the only hard requirement; the estimator sends an empty Bearer only
+        # when no key is stored.
+        return bool(entry.get("base_url"))
     if entry.get("api_key"):
         return True
-    env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-           "groq": "GROQ_API_KEY", "qwenplan": "QWENPLAN_API_KEY"}.get(kind)
+    env = provider_env_key(kind or "")
     if env:
         return bool(os.environ.get(env))
     if kind == "ollama":
@@ -635,7 +752,11 @@ def build_chain(settings: dict) -> list:
     configuration.
     """
     chain = []
-    for entry in settings.get("providers") or []:
+    # Personal providers first; connections shared by other accounts are
+    # fallbacks after them so a user's own key/priority always wins.
+    entries = list(settings.get("providers") or []) + \
+        list(settings.get("shared_providers") or [])
+    for entry in entries:
         if entry.get("enabled") is False:
             continue
         if not _has_credentials(entry):
@@ -670,7 +791,14 @@ def _run_chain(call, settings: dict) -> tuple[dict, str, str]:
             model = getattr(prov, "model", prov.name)
             return meal, prov.name, model
         except Exception as e:
-            errors.append(f"{prov.name}: {type(e).__name__}: {str(e)[:180]}")
+            msg = str(e)
+            key = str(getattr(prov, "key", "") or "")
+            if key:
+                # A provider (or a misconfigured gateway) may echo the request
+                # in an error body; never let a shared owner's key surface in a
+                # recipient's warning string.
+                msg = msg.replace(key, "[redacted]")
+            errors.append(f"{prov.name}: {type(e).__name__}: {msg[:180]}")
     raise ProviderError(" | ".join(errors) or "no providers configured")
 
 

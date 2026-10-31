@@ -2,7 +2,9 @@
    shell is served network-first so a deploy is picked up immediately; the cache
    is only an offline fallback. Asset URLs are build-versioned by the server, so
    stale code can't be reused even from this cache. */
-const CACHE = 'macrolog-shell-v21';
+// Bump this whenever the shell/API contract changes. A stale worker with an
+// older cache is the most common reason a hard refresh still shows old UI.
+const CACHE = 'macrolog-shell-v22';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {

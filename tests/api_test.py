@@ -6,10 +6,12 @@ caller's environment; deletes nothing you care about.
 """
 import json
 import os
+import threading
 import time
 import sys
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8790"
 PASS, FAIL = [], []
@@ -62,7 +64,8 @@ print(f"\nMacroLog API tests -> {BASE} (stub-pinned)\n")
 st, s = req("/api/state")
 check("state returns 200", st == 200, str(st))
 check("state has targets.calories", isinstance(s.get("targets", {}).get("calories"), int))
-KNOWN_PROVIDERS = {"qwenplan", "groq", "gemini", "openai", "ollama", "stub"}
+KNOWN_PROVIDERS = {"qwenplan", "groq", "gemini", "openai", "openrouter",
+                   "custom", "ollama", "stub"}
 check("active provider is known", s.get("active_provider") in KNOWN_PROVIDERS,
       str(s.get("active_provider")))
 
@@ -88,6 +91,28 @@ if meal_id:
     st, s2 = req("/api/state")
     photos = [x["photo"] for x in s2["meals"] if x["id"] == meal_id]
     check("photo promoted to permanent store", bool(photos[0]) if photos else False)
+
+# 3b. Copy a saved meal (including its photo) to today without moving the original.
+today_copy = time.strftime("%Y-%m-%d")
+st, cp = req(f"/api/meals/{meal_id}/copy", "POST", {"date": today_copy})
+copy_id = cp.get("id")
+check("copy meal -> 201", st == 201 and copy_id and copy_id != meal_id, str(cp)[:140])
+st, orig = req(f"/api/meals/{meal_id}")
+st, dup = req(f"/api/meals/{copy_id}")
+check("copy keeps the description and totals",
+      dup.get("description") == orig.get("description")
+      and abs(float(dup.get("calories") or 0) - float(orig.get("calories") or 0)) < 0.1,
+      str(dup)[:140])
+check("copy lands on the requested date", dup.get("date") == today_copy,
+      f"{dup.get('date')} vs {today_copy}")
+check("copy has its own photo file", bool(dup.get("photos")) and bool(orig.get("photos"))
+      and dup["photos"][0] != orig["photos"][0],
+      f"{dup.get('photos')} vs {orig.get('photos')}")
+req(f"/api/meals/{copy_id}", "DELETE")
+st, orig2 = req(f"/api/meals/{meal_id}")
+check("deleting the copy leaves the original intact",
+      st == 200 and orig2.get("id") == meal_id and bool(orig2.get("photos")),
+      str(orig2)[:120])
 
 # 4. edit records a correction (the calibration training signal)
 st, u = req(f"/api/meals/{meal_id}", "PATCH", {"calories": 700, "protein": 50})
@@ -137,10 +162,56 @@ check("age persists after save+reload", p.get("age") == 41, str(p.get("age")))
 check("height persists after save+reload", p.get("height_cm") == 183, str(p.get("height_cm")))
 check("profile-set clears needs_setup nag", s2.get("needs_setup") is False, str(s2.get("needs_setup")))
 
+# 8c. Per-user provider config: keys are write-only and survive reorder by id.
+SECRET = "sk-or-test-DO-NOT-LEAK"
+st, pv = req("/api/settings", "PUT", {"providers": [
+    {"kind": "stub"},
+    {"kind": "openrouter", "model": "qwen/qwen3.8-flash",
+     "base_url": "https://openrouter.ai/api/v1", "enabled": False,
+     "shared": True, "api_key": SECRET},
+]})
+provs = (pv.get("settings") or {}).get("providers") or []
+check("provider settings save", st == 200 and len(provs) == 2, str(pv)[:140])
+check("saved provider key is never returned", SECRET not in json.dumps(pv))
+check("provider reports a write-only saved key",
+      len(provs) == 2 and provs[1].get("has_key") is True
+      and provs[1].get("key_source") == "saved", str(provs)[:180])
+check("provider reports its share flag", provs[1].get("shared") is True,
+      str(provs[1])[:140])
+check("a user's own shared provider is not in shared_providers",
+      (pv.get("settings") or {}).get("shared_providers") == [],
+      str((pv.get("settings") or {}).get("shared_providers"))[:120])
+st, sd_prov = req("/api/state")
+check("state never carries the provider key", SECRET not in json.dumps(sd_prov))
+check("state marks the personal provider as shared",
+      any(p.get("shared") for p in sd_prov.get("providers") or []),
+      str(sd_prov.get("providers"))[:160])
+st, pv2 = req("/api/settings", "PUT", {"providers": [
+    {"id": provs[1]["id"], "kind": "openrouter", "model": "qwen/qwen3.8-flash",
+     "base_url": "https://openrouter.ai/api/v1", "enabled": False},
+    {"id": provs[0]["id"], "kind": "stub", "enabled": True},
+]})
+provs2 = (pv2.get("settings") or {}).get("providers") or []
+check("reordering preserves the saved key by stable id",
+      len(provs2) == 2 and provs2[0].get("has_key") is True,
+      str(provs2)[:180])
+# Saving an unrelated body/goal field must not clobber the provider chain.
+req("/api/settings", "PUT", {"weekly_rate_kg": -0.75})
+st, pv3 = req("/api/settings")
+provs3 = (pv3.get("settings") or {}).get("providers") or []
+check("saving body settings keeps the provider chain",
+      len(provs3) == 2 and provs3[0].get("has_key") is True, str(provs3)[:160])
+
 # 9. export
 st, xp = req("/api/export")
 check("export has meals", st == 200 and len(xp.get("meals", [])) >= 1, str(st))
 check("export carries no api keys", "api_key" not in json.dumps(xp).lower())
+check("export does not carry the saved key value", SECRET not in json.dumps(xp))
+check("export omits connections shared by other users",
+      "shared_providers" not in json.dumps(xp))
+
+# Restore the offline stub for the remaining estimate tests.
+req("/api/settings", "PUT", {"providers": [{"kind": "stub"}]})
 
 # 10. delete
 st, d = req(f"/api/meals/{meal_id}", "DELETE")
@@ -614,6 +685,61 @@ check("limit is honoured", len((qf1.get("foods") or [])) == 1, str(qf1)[:90])
 st, sd = req("/api/state")
 check("crosscheck field is absent without JEV_API_KEY",
       "crosscheck" not in sd, str(sorted(sd.keys()))[:120])
+
+# 33. Model discovery: OpenRouter gets filtered to image-capable, non-batch
+#     models; a generic OpenAI-compatible endpoint returns everything. The mock
+#     server keeps this deterministic and offline.
+MODEL_FIXTURE = {"data": [
+    {"id": "vendor/vision-1", "name": "Vision One", "context_length": 128000,
+     "architecture": {"input_modalities": ["text", "image"]},
+     "pricing": {"prompt": "0.00000015", "completion": "0.0000006"}},
+    {"id": "vendor/text-1", "name": "Text One", "context_length": 32000,
+     "architecture": {"input_modalities": ["text"]},
+     "pricing": {"prompt": "0.0000001"}},
+    {"id": "vendor/vision-1:batch", "name": "Vision batch", "context_length": 128000,
+     "architecture": {"input_modalities": ["text", "image"]}},
+]}
+
+
+class ModelProvider(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        if not self.path.endswith("/models"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps(MODEL_FIXTURE).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+mock = ThreadingHTTPServer(("127.0.0.1", 0), ModelProvider)
+threading.Thread(target=mock.serve_forever, daemon=True).start()
+mock_base = f"http://127.0.0.1:{mock.server_address[1]}/v1"
+try:
+    st, ml = req("/api/provider/models", "POST",
+                 {"kind": "custom", "base_url": mock_base})
+    check("generic endpoint lists every model", st == 200
+          and len(ml.get("models", [])) == 3, str(ml)[:160])
+    st, ml = req("/api/provider/models", "POST",
+                 {"kind": "openrouter", "base_url": mock_base})
+    ids = [m.get("id") for m in ml.get("models", [])]
+    check("OpenRouter list hides text-only and batch models",
+          st == 200 and ids == ["vendor/vision-1"], str(ids))
+    st, bad = req("/api/provider/models", "POST",
+                  {"kind": "openrouter", "base_url": "ftp://bad"})
+    check("model discovery rejects non-http URLs", st == 400, str(bad)[:100])
+    st, bad = req("/api/settings", "PUT",
+                  {"providers": [{"kind": "custom", "model": "m"}]})
+    check("custom provider rejects a missing base URL", st == 400, str(bad)[:120])
+finally:
+    mock.shutdown()
+    mock.server_close()
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

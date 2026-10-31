@@ -76,11 +76,12 @@ sed -e "s#^ExecStart=.*#ExecStart=$PYBIN $APP_DIR/server.py#" \
     "$SRC_DIR/deploy/macrolog.service" > /etc/systemd/system/macrolog.service
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
-  log "Creating $APP_DIR/.env from template (ADD YOUR API KEY)"
+  log "Creating $APP_DIR/.env from template (optional provider keys)"
   cp "$SRC_DIR/.env.example" "$APP_DIR/.env"
   chown "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
-  warn "No provider key yet. Edit $APP_DIR/.env, set GROQ_API_KEY (free), then:"
+  warn "No provider key yet. Add one per user in Settings -> AI provider after sign-in,"
+  warn "or put a fallback in $APP_DIR/.env (e.g. OPENROUTER_API_KEY), then:"
   warn "  systemctl restart macrolog"
 fi
 
@@ -104,8 +105,10 @@ cat <<EOF
 
     iPhone reaches it at your Caddy hostname over HTTPS (camera works there).
 
-  Vision key: $APP_DIR/.env should already define QWENPLAN_API_KEY / _BASE_URL.
-    If empty, add one (Qwen/Groq/Gemini/OpenAI/Ollama), then:
+  Provider keys: add them per user in Settings -> AI provider (OpenRouter, Qwen,
+    Groq, Gemini, OpenAI, Ollama, or a custom endpoint). Optional fallbacks can
+    live in $APP_DIR/.env (OPENROUTER_API_KEY, QWENPLAN_API_KEY, ...); after
+    editing that file:
       systemctl restart macrolog
 
   Logs:          journalctl -u macrolog -f

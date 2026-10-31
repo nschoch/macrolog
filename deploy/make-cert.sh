@@ -55,7 +55,7 @@ Done. Files:
   $OUT_DIR/macrolog.key   (keep private)
 
 Point the server at them:
-  MACROLOG_TLS_CERT=$OUT_DIR/macrolog.crt MACROLOG_TLS_KEY=$***
+  MACROLOG_TLS_CERT=$OUT_DIR/macrolog.crt MACROLOG_TLS_KEY=$OUT_DIR/macrolog.key
 
 To make iPhone stop warning / allow camera:
   1. AirDrop or host macrolog.crt and open it on the phone -> Settings installs profile

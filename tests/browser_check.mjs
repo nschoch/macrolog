@@ -213,6 +213,41 @@ try {
   check('settings view active', s0.viewActive);
   check('button shows "auto" on fresh account (calorie_target null)', s0.label === 'auto', `label=${s0.label}`);
 
+  // ---- AI provider card: empty state + add/edit sheet wiring --------------
+  const provUi = await evalJson(`(() => {
+    const list = state.settings.providers || [];
+    return {count: list.length, emptyHidden: document.getElementById('provider-empty').hidden,
+            add: !!document.getElementById('btn-add-provider'),
+            oldEdit: !!document.getElementById('btn-edit-providers')};
+  })()`);
+  check('provider empty state matches the saved list',
+        provUi.emptyHidden === (provUi.count > 0), JSON.stringify(provUi));
+  check('provider add control exists and old shared editor is gone',
+        provUi.add && !provUi.oldEdit, JSON.stringify(provUi));
+
+  const provErrs = jsErrors.length;
+  await evalJson(`document.getElementById('btn-add-provider').click()`);
+  await sleep(300);
+  const provSheet = await evalJson(`({
+    hidden: document.getElementById('provider-sheet').hidden,
+    kind: document.getElementById('prov-kind').value,
+    base: document.getElementById('prov-base').value,
+    keyType: document.getElementById('prov-key').type,
+    share: !!document.getElementById('prov-share'),
+    shareChecked: document.getElementById('prov-share').checked,
+    sharedSection: !!document.getElementById('shared-provider-wrap')})`);
+  check('Add provider opens the OpenRouter preset',
+        !provSheet.hidden && provSheet.kind === 'openrouter' &&
+        provSheet.base.includes('openrouter.ai') && provSheet.keyType === 'password',
+        JSON.stringify(provSheet));
+  check('Provider sheet exposes an off-by-default share toggle',
+        provSheet.share && provSheet.shareChecked === false && provSheet.sharedSection,
+        JSON.stringify(provSheet));
+  await evalJson(`document.getElementById('btn-prov-cancel').click()`);
+  await sleep(200); watchdog(); drain();
+  check('opening/closing the provider sheet has no JS error',
+        jsErrors.length === provErrs, jsErrors.slice(provErrs).join(' | ').slice(0, 300));
+
   // Click 1: auto -> lock (server pins 2200 fallback when target was null? see code: locks at s.calorie_target || 2200)
   const errsBefore = jsErrors.length;
   await evalJson(`document.getElementById('btn-unlock').click()`);
@@ -598,9 +633,13 @@ try {
     const st = await fetch('/api/state').then(r => r.json());
     const meal = st.meals.find(m => m.description === 'rescan probe');
     closeSheets();
-    openReview({ estimate: meal, editingId: meal.id,
-                 photoUrl: '/api/photo/' + meal.photos[0] });
+    // Open through the row's Edit action (not openReview directly): this is the
+    // path that used to drop the saved photo list and hide Rescan.
+    await refresh();
+    document.querySelector('.meal[data-id="' + meal.id + '"] [data-act="edit"]').click();
+    await new Promise(r => setTimeout(r, 300));
     const out = { visibleForPhoto: !document.getElementById('btn-rescan').hidden,
+                  copyVisible: !document.getElementById('btn-copy-meal').hidden,
                   itemsBefore: compItems.length,
                   wasEditing: document.getElementById('review-sheet').dataset.editing };
     document.getElementById('btn-rescan').click();
@@ -609,17 +648,26 @@ try {
     out.editingAfter = document.getElementById('review-sheet').dataset.editing;
     out.toast = document.getElementById('toast').hidden ? '' : document.getElementById('toast').textContent;
     out.dateKept = document.getElementById('r-date').value === (meal.date || todayISO());
+    // Duplicate the saved meal through the new button, then clean both up.
+    document.getElementById('btn-copy-meal').click();
+    await new Promise(r => setTimeout(r, 2500));
+    const afterCopy = await fetch('/api/state').then(r => r.json());
+    out.copyIds = afterCopy.meals.filter(m => m.description === 'rescan probe'
+      && m.id !== meal.id).map(m => m.id);
     // A text-only estimate has no image, so the button must stay hidden.
     closeSheets();
     openReview({ estimate: { description: 'text only', calories: 100, protein: 5,
                              carbs: 10, fat: 4, items: [] } });
     out.hiddenForText = document.getElementById('btn-rescan').hidden;
     closeSheets();
+    for (const cid of out.copyIds || []) await fetch('/api/meals/' + cid, { method: 'DELETE' });
     await fetch('/api/meals/' + meal.id, { method: 'DELETE' });
     return JSON.stringify(out);
   })()`);
   const rs = JSON.parse(rescan);
-  check('rescan button appears for a meal with a photo', rs.visibleForPhoto === true, rescan);
+  check('rescan button appears when editing a photo meal from the row', rs.visibleForPhoto === true, rescan);
+  check('copy-to-today button appears for a saved meal', rs.copyVisible === true, rescan);
+  check('copy-to-today creates a second copy', (rs.copyIds || []).length === 1, rescan);
   check('rescan keeps the meal in edit mode (saves update, not duplicate)',
         rs.editingAfter === rs.wasEditing && !!rs.editingAfter, rescan);
   check('rescan repopulates the components', rs.itemsAfter >= 1 && rs.itemsBefore >= 1, rescan);
@@ -914,49 +962,55 @@ try {
         rt.reopen && rt.reopen.mode === 'auto' && rt.reopen.grams === '10', round);
   await evalJson(`closeSheets()`);
 
-  // ---- Provider editor (LOCAL ONLY) -------------------------------------
-  // This section PUTs /api/settings {providers}, and providers are SHARED
-  // across all users -- running it against production would replace the real
-  // vision chain with the offline stub (it did once). Skip unless the target
-  // looks local or ML_ALLOW_PROVIDER_EDITS=1 says otherwise.
+  // ---- Provider editing (LOCAL ONLY) -------------------------------------
+  // This section mutates the signed-in user's provider chain. That is per-user
+  // now, but skip it against a production target anyway so a test run cannot
+  // replace a real chain with the offline stub (it did once).
   const mayEditProviders = isLocalTarget || process.env.ML_ALLOW_PROVIDER_EDITS === '1';
-  if (!mayEditProviders) console.log('[harness] skipping provider-editor checks (shared config; set ML_ALLOW_PROVIDER_EDITS=1 to force)');
+  if (!mayEditProviders) console.log('[harness] skipping provider-editor checks (set ML_ALLOW_PROVIDER_EDITS=1 to force)');
   if (mayEditProviders) {
-  // edits target the visible row, disabled entries stop being used. ----
   await evalJson(`(() => { document.querySelector('button[data-view="settings"]').click(); })()`);
   await sleep(500);
   const prov = await evalJson(`(async () => {
-    await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    const r = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ providers: [{ kind: 'stub', model: '' },
                                          { kind: 'qwenplan', model: 'M-A' },
                                          { kind: 'groq', model: 'M-B' }] }) });
+    if (!r.ok) throw new Error('seed providers failed: ' + await r.text());
     await refresh();
-    $('btn-edit-providers').click();
-    await new Promise(r => setTimeout(r, 200));
-    const out = { start: provDraft.map(p => [p.kind, p.model]) };
-    document.querySelector('.prov-row[data-i="1"] [data-down]').click();   // qwenplan -> last
-    await new Promise(r => setTimeout(r, 200));
-    out.afterMove = provDraft.map(p => [p.kind, p.model]);
-    // edit whichever row is visually first after the move
-    const inp = document.querySelector('.prov-row[data-i="0"] input[data-f="model"]');
-    out.firstKind = document.querySelector('.prov-row[data-i="0"] .prov-name').textContent;
-    inp.value = 'EDITED'; inp.dispatchEvent(new Event('input', { bubbles: true }));
-    out.afterEdit = provDraft.map(p => [p.kind, p.model]);
-    // disable stub so only the real-ish chain remains
-    const cb = document.querySelector('.prov-row[data-i="0"] input[data-toggle]');
-    cb.checked = false; cb.dispatchEvent(new Event('change', { bubbles: true }));
-    $('btn-save-providers').click();
+    const out = { start: state.settings.providers.map(p => [p.kind, p.model]) };
+
+    // Reorder through the row controls, then verify the server kept the model
+    // with its provider (not with the old index).
+    const q = state.settings.providers.find(p => p.kind === 'qwenplan');
+    document.querySelector('.prov-row[data-id="' + q.id + '"] [data-down]').click();
     await new Promise(r => setTimeout(r, 2200));
-    const st = await fetch('/api/state').then(r => r.json());
+    out.afterMove = state.settings.providers.map(p => [p.kind, p.model]);
+
+    // Edit the model through the sheet.
+    const q2 = state.settings.providers.find(p => p.kind === 'qwenplan');
+    document.querySelector('.prov-row[data-id="' + q2.id + '"] [data-edit]').click();
+    await new Promise(r => setTimeout(r, 200));
+    document.getElementById('prov-model').value = 'EDITED';
+    document.getElementById('btn-prov-save').click();
+    await new Promise(r => setTimeout(r, 2200));
+    out.afterEdit = state.settings.providers.map(p => [p.kind, p.model]);
+
+    // Disable the stub and confirm it reaches the server.
+    const stub = state.settings.providers.find(p => p.kind === 'stub');
+    document.querySelector('.prov-row[data-id="' + stub.id + '"] input[data-toggle]').click();
+    await new Promise(r => setTimeout(r, 2200));
+    const st = await fetch('/api/state').then(x => x.json());
     out.saved = st.settings.providers.map(p => [p.kind, p.model, p.enabled !== false]);
     return JSON.stringify(out);
   })()`);
   const po = JSON.parse(prov);
   check('reorder moves the whole entry (model travels with provider)',
         JSON.stringify(po.afterMove) === JSON.stringify([['stub', ''], ['groq', 'M-B'], ['qwenplan', 'M-A']]), prov);
-  check('editing targets the visible row', po.firstKind === 'stub' && po.afterEdit[0][1] === 'EDITED', prov);
-  check('provider edits persist to the server',
-        Array.isArray(po.saved) && po.saved.length === 3 && po.saved[0][2] === false, prov);
+  check('editing a provider persists the new model',
+        po.afterEdit.some(x => x[0] === 'qwenplan' && x[1] === 'EDITED'), prov);
+  check('provider disable persists to the server',
+        po.saved.some(x => x[0] === 'stub' && x[2] === false), prov);
   }
 
   // ---- Trend view must actually paint (regression: prepCanvas returned `h`

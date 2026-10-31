@@ -154,6 +154,62 @@ try:
     check("user A sees their meal", a_sees, str(dA.get("intake"))[:80])
     check("user B sees NO data (isolated)", b_empty, str(dB.get("intake"))[:80])
 
+    # 10. PROVIDER KEYS ARE PER-USER: B must not inherit or see A's key.
+    SECRET = "sk-auth-test-DO-NOT-LEAK"
+    stA,_,bdA = req("/api/settings", method="PUT",
+                    headers={"Cookie":"macrolog_session="+ck_a},
+                    body={"providers":[{"kind":"openrouter",
+                          "model":"qwen/qwen3.8-flash","enabled":True,
+                          "shared":True,"api_key":SECRET}]})
+    provA = (json.loads(bdA).get("settings") or {}).get("providers") or []
+    check("A can save a personal provider", stA == 200 and len(provA) == 1, bdA[:120])
+    check("A's provider key is never echoed", SECRET not in bdA)
+    check("A's provider is marked shared", provA and provA[0].get("shared") is True,
+          bdA[:140])
+    stB,_,bdB = req("/api/settings", headers={"Cookie":"macrolog_session="+ck_b})
+    setB = json.loads(bdB).get("settings") or {}
+    provB = setB.get("providers") or []
+    sharedB = setB.get("shared_providers") or []
+    check("B does not inherit A's personal chain", stB == 200 and provB == [], bdB[:140])
+    check("B sees A's shared connection", len(sharedB) == 1
+          and sharedB[0].get("shared_by") == "Test User", bdB[:180])
+    check("B never sees A's shared key", SECRET not in bdB)
+    stBState,_,bdBState = req("/api/state", headers={"Cookie":"macrolog_session="+ck_b})
+    stateB = json.loads(bdBState)
+    sharedState = [p for p in stateB.get("providers") or [] if p.get("shared_by")]
+    check("B's provider chain includes the shared fallback",
+          stBState == 200 and len(sharedState) == 1
+          and sharedState[0].get("configured") is True
+          and sharedState[0].get("editable") is False, bdBState[:180])
+    check("B's active provider can be the shared one",
+          stateB.get("active_provider") == "openrouter",
+          str(stateB.get("active_provider")))
+    check("B's state never carries A's key", SECRET not in bdBState)
+    stB2,_,bdB2 = req("/api/settings", method="PUT",
+                      headers={"Cookie":"macrolog_session="+ck_b},
+                      body={"providers":[{"kind":"custom","model":"local",
+                            "base_url":"http://127.0.0.1:9/v1"}]})
+    provB2 = (json.loads(bdB2).get("settings") or {}).get("providers") or []
+    check("B can save a different provider",
+          stB2 == 200 and len(provB2) == 1 and provB2[0].get("kind") == "custom",
+          bdB2[:140])
+    stA2,_,bdA2 = req("/api/settings", headers={"Cookie":"macrolog_session="+ck_a})
+    provA2 = (json.loads(bdA2).get("settings") or {}).get("providers") or []
+    check("B's save leaves A's provider and key intact",
+          len(provA2) == 1 and provA2[0].get("kind") == "openrouter"
+          and provA2[0].get("has_key") is True, bdA2[:140])
+    # A can revoke sharing without deleting the provider.
+    stA3,_,bdA3 = req("/api/settings", method="PUT",
+                      headers={"Cookie":"macrolog_session="+ck_a},
+                      body={"providers":[{"id":provA2[0]["id"],
+                            "kind":"openrouter","model":"qwen/qwen3.8-flash",
+                            "enabled":True,"shared":False}]})
+    check("A can turn sharing off", stA3 == 200, bdA3[:120])
+    stB3,_,bdB3 = req("/api/settings", headers={"Cookie":"macrolog_session="+ck_b})
+    check("unsharing removes it for B",
+          (json.loads(bdB3).get("settings") or {}).get("shared_providers") == [],
+          bdB3[:140])
+
 finally:
     proc.terminate(); proc.wait(timeout=5)
     idp.shutdown()

@@ -17,6 +17,8 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import date, datetime, timedelta
 from http.cookies import SimpleCookie
@@ -29,8 +31,10 @@ from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           calibration_multipliers, macronutrient_targets,
                           record_correction, tdee_from_formula, weight_trend)
 from app.database import Database
-from app.vision import (ProviderError, estimate_meal, estimate_photo,
-                           estimate_text)
+from app.vision import (PROVIDER_KINDS, ProviderError, estimate_meal,
+                        estimate_photo, estimate_text, provider_default_base,
+                        provider_default_model, provider_env_key,
+                        provider_key_source)
 from app import auth as OIDC
 from app import jev as JEVC
 
@@ -59,14 +63,13 @@ DEFAULT_SETTINGS = {
     "calibrate_estimates": True,
     "time_format": "12h",            # 12h | 24h (display only; storage is epochs)
     "meal_gap_minutes": 45,          # meals logged within this gap = one sitting
-    # Provider chain, tried in order. First entry wins; missing keys are skipped.
-    "providers": [
-        {"kind": "qwenplan", "model": "qwen3.8-flash"},
-        {"kind": "groq",   "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
-        {"kind": "gemini", "model": "gemini-2.5-flash"},
-        {"kind": "openai", "model": "gpt-4o-mini"},
-        {"kind": "ollama", "model": "llama3.2-vision:11b"},
-    ],
+    # Provider chain, tried in order. Empty by default: every account brings
+    # its own provider/key rather than inheriting the operator's. The offline
+    # stub is appended automatically when no real provider is ready.
+    "providers": [],
+    # Derived at read time from providers other users marked shared=true. It is
+    # never written into a user's settings blob.
+    "shared_providers": [],
 }
 
 db = Database(DB_PATH)
@@ -75,6 +78,54 @@ _LOG_LOCK = threading.Lock()
 # Canonical storage is metric; these convert the imperial presentation edge.
 LB_PER_KG = 2.2046226
 CM_PER_IN = 2.54
+
+
+def _new_provider_id() -> str:
+    """Stable per-entry id so reordering never makes one key adopt another's row."""
+    return uuid.uuid4().hex[:12]
+
+
+def _migrate_shared_providers() -> None:
+    """Move the old server-wide provider chain into each existing account.
+
+    Before providers became per-user, `settings.providers` was shared by every
+    OIDC account. Copy it once to each account that existed at upgrade time (and
+    to `default` for no-auth installs), then delete it from the shared blob.
+    Accounts created afterwards start empty -- that is what stops a new family
+    member from silently spending the operator's Qwen/OpenRouter key.
+    """
+    shared = db.get_setting("settings", {}) or {}
+    if not isinstance(shared, dict) or "providers" not in shared:
+        return
+    providers = shared.pop("providers") or []
+    if not isinstance(providers, list):
+        providers = []
+    for p in providers:
+        if isinstance(p, dict) and not p.get("id"):
+            p["id"] = _new_provider_id()
+
+    owners = {"default"}
+    try:
+        owners.update(str(r["subject"]) for r in
+                      db.query("SELECT subject FROM users"))
+    except Exception:
+        pass
+    moved = 0
+    for owner in owners:
+        key = f"settings:{owner}"
+        personal = db.get_setting(key, {}) or {}
+        if not isinstance(personal, dict):
+            personal = {}
+        if "providers" not in personal:
+            personal["providers"] = json.loads(json.dumps(providers))
+            db.set_setting(key, personal)
+            moved += 1
+    db.set_setting("settings", shared)
+    if providers:
+        print(f"[migrate] moved shared provider chain to {moved} account(s)")
+
+
+_migrate_shared_providers()
 
 
 def load_env():
@@ -99,7 +150,63 @@ USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
                      "calorie_target", "start_date", "starting_weight_kg",
                      "auto_adapt", "calibrate_estimates", "_profile_set",
-                     "meal_gap_minutes", "time_format"}
+                     "meal_gap_minutes", "time_format", "providers"}
+
+
+def _shared_owner_label(subject: str) -> str:
+    """Human label for the person who shared a connection."""
+    if subject == "default":
+        return "the server"
+    try:
+        user = db.get_user(subject)
+    except Exception:
+        user = None
+    if user:
+        label = str(user.get("name") or user.get("email") or "").strip()
+        if label:
+            return label[:80]
+    return "another user"
+
+
+def _shared_providers_for(owner: str) -> list[dict]:
+    """Providers other users marked `shared: true`, with their owner's label.
+
+    Sharing is a live flag on the owner's own provider entry, not a copy: edits,
+    key changes, disabling, and unsharing propagate immediately. The key is kept
+    in memory for the estimator; `_public_settings` strips it before any response.
+    """
+    out = []
+    try:
+        rows = db.query(
+            "SELECT key, value FROM settings WHERE key LIKE 'settings:%' ORDER BY key")
+    except Exception:
+        return out
+    for row in rows:
+        key = str(row["key"])
+        subject = key[len("settings:"):] if key.startswith("settings:") else ""
+        if not subject or subject == owner:
+            continue
+        try:
+            blob = json.loads(row["value"])
+        except Exception:
+            continue
+        providers = blob.get("providers") if isinstance(blob, dict) else None
+        if not isinstance(providers, list):
+            continue
+        label = _shared_owner_label(subject)
+        for p in providers:
+            if not isinstance(p, dict) or p.get("enabled") is False:
+                continue
+            if p.get("shared") is not True or p.get("kind") not in PROVIDER_KINDS:
+                continue
+            if p.get("kind") == "stub":
+                continue
+            entry = json.loads(json.dumps(p))
+            entry["shared"] = True
+            entry["shared_by"] = label
+            entry["_shared_owner"] = subject
+            out.append(entry)
+    return out
 
 
 def get_settings(owner: str = "default") -> dict:
@@ -108,13 +215,17 @@ def get_settings(owner: str = "default") -> dict:
     shared = db.get_setting("settings", {}) or {}
     if isinstance(shared, dict):
         shared.pop("api_key", None)
-        # Only provider/vision config is shared; ignore stray legacy keys here.
+        # Only non-user keys are inherited from the shared blob. Providers are
+        # per-user now; the startup migration moved the legacy shared chain.
         for k, v in shared.items():
             if k not in USER_SETTING_KEYS:
                 merged[k] = v
     personal = db.get_setting(f"settings:{owner}", {}) or {}
     if isinstance(personal, dict):
         merged.update(personal)
+    # A user cannot persist this derived list; always rebuild it from the other
+    # accounts' current flags so unsharing/removal takes effect immediately.
+    merged["shared_providers"] = _shared_providers_for(owner)
     return merged
 
 
@@ -180,6 +291,12 @@ def local_ts_for(date_str: str, fallback_hour: int = 12, tz=None) -> int:
 
 
 # ============================================================== API handlers
+def _effective_providers(settings: dict) -> list[dict]:
+    """A user's own chain followed by connections shared by other accounts."""
+    return list(settings.get("providers") or []) + \
+        list(settings.get("shared_providers") or [])
+
+
 class Api:
     """Each method returns (status_code, payload_dict)."""
 
@@ -209,11 +326,16 @@ class Api:
         tmp = dict(s); tmp["_current_weight_kg"] = trend["current_kg"]
         targets = macronutrient_targets(target, tmp)
         # Disabled entries must not count as ready or become active_provider.
-        ready = [p["kind"] for p in s.get("providers", [])
+        effective = _effective_providers(s)
+        ready = [p["kind"] for p in effective
                  if p.get("enabled", True) and _provider_ready(p)]
-        providers = [{"kind": p["kind"], "model": p.get("model"),
-                     "configured": (p["kind"] == "stub") or (_provider_ready(p) and not p.get("unreachable"))}
-                    for p in s.get("providers", [])]
+        providers = [{"id": p.get("id"), "kind": p.get("kind"),
+                      "model": p.get("model"),
+                      "shared": bool(p.get("shared")),
+                      "shared_by": p.get("shared_by"),
+                      "editable": not p.get("shared_by"),
+                     "configured": (p.get("kind") == "stub") or (_provider_ready(p) and not p.get("unreachable"))}
+                    for p in effective]
         dicts = [_meal_dict(m, item_map.get(m["id"], [])) for m in meals]
         return 200, {
             "date": t, "meals": dicts,
@@ -476,6 +598,46 @@ class Api:
         return 201, {"id": mid, **_day_summary(d, owner)}
 
     @staticmethod
+    def POST_copy_meal(h, q, body, meal_id):
+        """Copy a saved meal to a target date (today by default).
+
+        The copy is independent: its photos are duplicated so deleting either
+        meal cannot remove the other's image. The original is never modified.
+        """
+        owner = getattr(h, "owner", "default")
+        try:
+            mid = int(meal_id)
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid meal id"}
+        old = db.get_meal(mid, owner)
+        if not old:
+            return 404, {"error": "meal not found"}
+        tz = h._tz()
+        d = str(body.get("date") or today_str(tz))[:10]
+        try:
+            d = date.fromisoformat(d).isoformat()
+        except ValueError:
+            return 400, {"error": "invalid date (use YYYY-MM-DD)"}
+        # No time supplied -> keep the original's clock time on the new date, so
+        # a copied lunch still groups as lunch.
+        ts = _parse_when({"date": d, "time": body.get("time")},
+                         default_date=d, fallback_ts=old["ts"], tz=tz)
+        items = db.items_for_meal(mid)
+        photo = _copy_photos(old["photo_path"], d)
+        new_id = db.add_meal(
+            date=d, ts=ts, kind=old["kind"], description=old["description"],
+            calories=old["calories"], protein=old["protein"],
+            carbs=old["carbs"], fat=old["fat"], fiber=old["fiber"],
+            confidence=old["confidence"], photo_path=photo,
+            source=old["source"], provider=old["provider"],
+            model=old["model"], raw_json=old["raw_json"], owner=owner)
+        if items:
+            db.replace_meal_items(new_id, items)
+        _maybe_adapt(get_settings(owner), owner=owner)
+        return 201, {"id": new_id, "copied_from": mid, "date": d,
+                     **_day_summary(d, owner)}
+
+    @staticmethod
     def PATCH_meal(h, q, body, meal_id):
         owner = getattr(h, "owner", "default")
         mid = int(meal_id)
@@ -656,36 +818,77 @@ class Api:
                      "accuracy": accuracy_summary(db, owner),
                      "multipliers": calibration_multipliers(db, owner=owner),
                      "has_keys": {k: bool(os.environ.get(k)) for k in
-                                  ("GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "QWENPLAN_API_KEY")}}
+                                  ("GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
+                                   "QWENPLAN_API_KEY", "OPENROUTER_API_KEY")}}
 
     @staticmethod
     def PUT_settings(h, q, body):
         owner = getattr(h, "owner", "default")
-        # Per-person keys go to the user's own blob; shared keys (providers) stay global.
+        # Providers (and their keys) are personal now; a request can only ever
+        # write the signed-in user's own blob. Provider entries are sanitized so
+        # a client cannot inject arbitrary keys or non-http URLs.
+        current = get_settings(owner)
         personal = {k: v for k, v in body.items() if k in USER_SETTING_KEYS}
-        shared = {k: v for k, v in body.items() if k == "providers"}
+        if "providers" in body:
+            personal["providers"] = _clean_providers(
+                body.get("providers"), current.get("providers") or [])
         # Saving any body/goal field marks the profile as configured (clears nag).
         if personal.get("units") or personal.get("age") or personal.get("height_cm") \
                 or personal.get("sex") or personal.get("activity_factor"):
             personal["_profile_set"] = True
         if personal:
             save_user_settings(owner, personal)
-        if shared:
-            cur = db.get_setting("settings", {}) or {}
-            cur.update(shared)
-            db.set_setting("settings", cur)
         s = get_settings(owner)
         return 200, {"settings": _public_settings(s), "targets": macronutrient_targets(
             s.get("calorie_target") or tdee_from_formula(s) or 2200, s)}
+
+    @staticmethod
+    def POST_provider_models(h, q, body):
+        """List models for a provider using a draft or already-saved key.
+
+        The browser never talks to the provider directly: that would expose the
+        key to CORS preflights and third-party origins, and some providers do
+        not send CORS headers at all.
+        """
+        owner = getattr(h, "owner", "default")
+        current = get_settings(owner).get("providers") or []
+        saved = next((p for p in current
+                      if isinstance(p, dict) and p.get("id") == body.get("provider_id")), None)
+        kind = str(body.get("kind") or (saved or {}).get("kind") or "").strip().lower()
+        if kind not in PROVIDER_KINDS:
+            return 400, {"error": "unknown provider type"}
+        if kind == "stub":
+            return 200, {"models": []}
+
+        base = str(body.get("base_url") or (saved or {}).get("base_url") or
+                   provider_default_base(kind)).strip().rstrip("/")
+        if not _valid_provider_url(base):
+            return 400, {"error": "base URL must be a full http(s) URL"}
+        key = str(body.get("api_key") or (saved or {}).get("api_key") or
+                  os.environ.get(provider_env_key(kind), "")).strip()
+        try:
+            models = _fetch_models(kind, base, key)
+        except Exception as e:
+            # Provider error bodies can be verbose; keep the response short and
+            # redact the key if a gateway echoes it back.
+            detail = str(e)
+            if key:
+                detail = detail.replace(key, "[redacted]")
+            return 400, {"error": f"could not load models: {detail[:240]}"}
+        return 200, {"models": models, "kind": kind, "base_url": base}
 
     @staticmethod
     def GET_export(h, q, body):
         """Full data dump as JSON for the current user. Secrets are never included."""
         owner = getattr(h, "owner", "default")
         s = get_settings(owner)
+        settings = _public_settings(s)
+        # Connections shared by other accounts are not part of this user's
+        # backup; they remain owned by whoever shared them.
+        settings.pop("shared_providers", None)
         return 200, {
             "exported_at": datetime.now().isoformat(timespec="seconds"),
-            "settings": _public_settings(s),
+            "settings": settings,
             "meals": [_meal_dict(m) for m in db.query("SELECT * FROM meals WHERE owner=? ORDER BY ts", (owner,))],
             "weights": [dict(r) for r in db.query("SELECT date,value FROM weights WHERE owner=? ORDER BY date", (owner,))],
             "body_fat": [dict(r) for r in db.query("SELECT date,value FROM body_fat WHERE owner=? ORDER BY date", (owner,))],
@@ -700,35 +903,42 @@ class Api:
 
     @staticmethod
     def POST_test_provider(h, q, body):
-        """Ping each configured provider with a tiny text request."""
+        """Ping each enabled provider this user saved with a tiny request."""
+        owner = getattr(h, "owner", "default")
         results = []
-        for p in get_settings().get("providers", []):
+        for p in _effective_providers(get_settings(owner)):
+            if p.get("enabled") is False:
+                continue
             kind = p.get("kind")
+            if kind == "stub":
+                # The offline placeholder has no endpoint to ping; it is not a
+                # connection failure worth showing next to a real provider.
+                continue
+            model = p.get("model") or provider_default_model(kind)
+            shared_by = p.get("shared_by")
             try:
-                if kind == "stub":
-                    raise ProviderError("stub provider has no remote endpoint")
-                key_env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-                           "groq": "GROQ_API_KEY", "qwenplan": "QWENPLAN_API_KEY"}.get(kind)
-                key = p.get("api_key") or (os.environ.get(key_env) if key_env else "x")
-                if not key:
+                key = str(p.get("api_key") or
+                          os.environ.get(provider_env_key(kind), "")).strip()
+                if not key and kind not in ("custom", "ollama"):
                     raise ProviderError("no API key configured")
-                base = p.get("base_url") or {
-                    "gemini": "https://generativelanguage.googleapis.com",
-                    "openai": "https://api.openai.com/v1",
-                    "groq": "https://api.groq.com/openai/v1",
-                    "qwenplan": os.environ.get("QWENPLAN_BASE_URL",
-                            "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-                    "ollama": os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
-                }.get(kind)
-                url, payload, headers = _ping_request(kind, base, p.get("model"))
-                import urllib.request as U
-                req = U.Request(
-                    url, data=json.dumps(payload).encode(),
+                base = str(p.get("base_url") or
+                           provider_default_base(kind)).strip().rstrip("/")
+                if not _valid_provider_url(base):
+                    raise ProviderError("base URL must be a full http(s) URL")
+                url, payload, headers = _ping_request(kind, base, model, key)
+                data = json.dumps(payload).encode() if payload is not None else None
+                req = urllib.request.Request(
+                    url, data=data,
                     headers={"Content-Type": "application/json", **headers})
                 t0 = time.time()
-                with U.urlopen(req, timeout=30) as r:
+                # A user-supplied base URL must not be able to redirect the
+                # server into an unrelated internal address; _NoRedirect makes
+                # the request fail on any 3xx instead of following it.
+                opener = urllib.request.build_opener(_NoRedirect())
+                with opener.open(req, timeout=30) as r:
                     json.loads(r.read())
-                results.append({"kind": kind, "model": p.get("model"), "ok": True,
+                results.append({"id": p.get("id"), "kind": kind, "model": model,
+                                "shared_by": shared_by, "ok": True,
                                 "ms": int((time.time() - t0) * 1000)})
             except Exception as e:
                 msg = str(e)
@@ -737,25 +947,157 @@ class Api:
                         msg = e.read().decode()[:200]
                     except Exception:
                         pass
-                results.append({"kind": kind, "model": p.get("model"), "ok": False,
+                if key:
+                    msg = msg.replace(key, "[redacted]")
+                results.append({"id": p.get("id"), "kind": kind, "model": model,
+                                "shared_by": shared_by, "ok": False,
                                 "error": type(e).__name__ + ": " + msg[:220]})
         return 200, {"results": results}
 
 
-def _ping_request(kind, base, model):
-    import urllib.request as U
+def _valid_provider_url(url: str) -> bool:
+    """Only plain http(s) URLs with a host; no credentials in the URL.
+
+    We intentionally allow loopback/private hosts: Ollama and LAN OpenAI-
+    compatible servers are a first-class use case. Redirects are disabled by
+    _open_json so a user-supplied host cannot bounce the server into an
+    unrelated internal address.
+    """
+    if not url or len(url) > 500:
+        return False
+    if any(ord(c) < 32 for c in url):
+        return False
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    return (u.scheme in ("http", "https") and bool(u.hostname)
+            and not u.username and not u.password
+            and not u.query and not u.fragment)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_json(url: str, headers: dict | None = None, timeout: int = 20):
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:300]
+        raise ValueError(f"HTTP {e.code}: {body}") from None
+    except urllib.error.URLError as e:
+        raise ValueError(f"network: {e.reason}") from None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise ValueError("provider returned non-JSON") from None
+
+
+def _fetch_models(kind: str, base: str, key: str) -> list[dict]:
+    """Normalize a provider's model list for the Settings picker.
+
+    OpenRouter gets special treatment: its /models payload is public and carries
+    an `architecture.input_modalities` array, so we can hide the ~25% of models
+    that cannot accept a photo. Other OpenAI-compatible gateways usually expose
+    only ids; manual entry remains available in the UI.
+    """
+    base = base.rstrip("/")
+    if kind == "gemini":
+        data = _open_json(f"{base}/v1beta/models?pageSize=1000",
+                          {"x-goog-api-key": key} if key else {}, timeout=20)
+        rows = data.get("models") if isinstance(data, dict) else []
+        out = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            methods = row.get("supportedGenerationMethods") or []
+            if methods and "generateContent" not in methods:
+                continue
+            mid = str(row.get("name") or "").split("/")[-1]
+            if mid:
+                out.append({"id": mid, "name": row.get("displayName") or mid,
+                            "context_length": row.get("inputTokenLimit"),
+                            "vision": None, "pricing": {}})
+        return out[:500]
+
+    if kind == "ollama":
+        data = _open_json(f"{base}/api/tags", {}, timeout=10)
+        rows = data.get("models") if isinstance(data, dict) else []
+        out = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            mid = str(row.get("model") or row.get("name") or "")
+            if mid:
+                out.append({"id": mid, "name": mid,
+                            "context_length": None,
+                            "vision": None, "pricing": {}})
+        return out[:500]
+
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    if kind == "openrouter":
+        headers.update({"X-Title": "MacroLog",
+                        "HTTP-Referer": "https://github.com/nschoch/macrolog"})
+    data = _open_json(f"{base}/models", headers, timeout=20)
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("data") or data.get("models") or []
+    else:
+        rows = []
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        mid = str(row.get("id") or row.get("name") or "").strip()
+        if not mid:
+            continue
+        if kind == "openrouter" and mid.endswith(":batch"):
+            # Batch endpoints are cheaper but not interactive; they would make
+            # a photo estimate wait behind a queued job.
+            continue
+        arch = row.get("architecture") if isinstance(row.get("architecture"), dict) else {}
+        modalities = arch.get("input_modalities") or []
+        has_arch = bool(modalities) or bool(arch.get("modality"))
+        vision = (("image" in modalities) or
+                  ("image" in str(arch.get("modality") or ""))) if has_arch else None
+        if kind == "openrouter" and vision is not True:
+            continue
+        pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+        clean_pricing = {k: pricing[k] for k in ("prompt", "completion", "image")
+                         if pricing.get(k) is not None}
+        out.append({
+            "id": mid,
+            "name": str(row.get("name") or mid)[:160],
+            "context_length": row.get("context_length") or row.get("context_window"),
+            "vision": vision,
+            "pricing": clean_pricing,
+        })
+    return out[:500]
+
+
+def _ping_request(kind, base, model, key=""):
+    """Build a tiny provider-specific request used by the Test button."""
+    base = base.rstrip("/")
     if kind == "gemini":
         return (f"{base}/v1beta/models/{model}:generateContent",
                 {"contents": [{"parts": [{"text": "ping"}]}]},
-                {"x-goog-api-key": os.environ.get("GEMINI_API_KEY", "")})
+                {"x-goog-api-key": key})
     if kind == "ollama":
-        return (f"{base.rstrip('/')}/api/tags", {}, {})
+        return (f"{base}/api/tags", None, {})
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    if kind == "openrouter":
+        headers.update({"X-Title": "MacroLog",
+                        "HTTP-Referer": "https://github.com/nschoch/macrolog"})
     return (f"{base}/chat/completions",
             {"model": model, "messages": [{"role": "user", "content": "ping"}],
              "max_tokens": 5},
-            {"Authorization": "Bearer " + os.environ.get(
-                {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY",
-                 "qwenplan": "QWENPLAN_API_KEY"}.get(kind, ""), "")})
+            headers)
 
 
 def _provider_ready(entry: dict) -> bool:
@@ -767,15 +1109,105 @@ def _provider_ready(entry: dict) -> bool:
     return _has_credentials(entry)
 
 
+def _clean_providers(raw, existing=None) -> list[dict]:
+    """Validate a client-supplied provider chain without ever logging its keys.
+
+    Stable ids let the UI reorder/edit rows while the server keeps the matching
+    saved key. An absent `api_key` preserves the existing key; an explicit empty
+    string (or `clear_key`) removes it, which backs the "Remove saved key"
+    control.
+    """
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError("providers must be a list")
+    if len(raw) > 12:
+        raise ValueError("too many providers (max 12)")
+    existing = [p for p in (existing or []) if isinstance(p, dict)]
+    by_id = {str(p.get("id")): p for p in existing if p.get("id")}
+    out, seen = [], set()
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind not in PROVIDER_KINDS:
+            continue
+        raw_id = str(item.get("id") or "").strip()
+        src = by_id.get(raw_id) if raw_id else (existing[i] if i < len(existing) else None)
+        pid = raw_id or str((src or {}).get("id") or "")
+        if not pid or pid in seen:
+            pid = _new_provider_id()
+        seen.add(pid)
+
+        model = str(item.get("model") or "").strip()[:200]
+        base = str(item.get("base_url") or "").strip()
+        if len(base) > 500:
+            raise ValueError(f"{kind}: base URL is too long")
+        if base and not _valid_provider_url(base):
+            raise ValueError(f"{kind}: base URL must be a full http(s) URL")
+        if kind == "custom" and (not base or not model):
+            raise ValueError("custom provider needs a base URL and a model")
+        enabled = item.get("enabled") is not False
+        same_kind = src is not None and src.get("kind") == kind
+        # An explicit flag wins. An old client that does not send it keeps the
+        # existing share state, but a kind change does not silently re-share the
+        # new provider with everyone.
+        if "shared" in item:
+            shared = item.get("shared") is True
+        else:
+            shared = bool((src or {}).get("shared")) and same_kind
+        if kind == "stub":
+            shared = False
+        entry = {"id": pid, "kind": kind, "model": model,
+                 "base_url": base, "enabled": enabled, "shared": shared}
+
+        # Only carry a key across an edit of the same provider kind; changing
+        # OpenAI -> OpenRouter must not silently reuse the old credential. A
+        # non-empty api_key always wins over clear_key so the two controls
+        # cannot cancel each other out in a surprising order.
+        carries_key = same_kind
+        new_key = str(item.get("api_key") or "").strip()
+        if len(new_key) > 500:
+            raise ValueError("API key is too long")
+        if new_key:
+            entry["api_key"] = new_key
+        elif item.get("clear_key") or "api_key" in item:
+            pass
+        elif carries_key and src.get("api_key"):
+            entry["api_key"] = str(src["api_key"])[:500]
+        out.append(entry)
+    return out
+
+
+def _public_provider(p: dict, *, shared_by=None, editable=True) -> dict:
+    return {
+        "id": p.get("id") or "",
+        "kind": p.get("kind"),
+        "model": p.get("model"),
+        "base_url": p.get("base_url"),
+        "enabled": p.get("enabled", True),
+        "has_key": bool(p.get("api_key")),
+        "key_source": provider_key_source(p),
+        "shared": bool(p.get("shared")),
+        "shared_by": shared_by,
+        "editable": editable,
+    }
+
+
 def _public_settings(s: dict) -> dict:
     out = dict(s)
-    # api_key is deliberately NOT included: secrets stay on the server. The UI
-    # edits kind/model/base_url/enabled only; blanking base_url falls back to
-    # the server's env-derived default.
-    out["providers"] = [{"kind": p.get("kind"), "model": p.get("model"),
-                         "base_url": p.get("base_url"),
-                         "enabled": p.get("enabled", True)}
-                        for p in s.get("providers", [])]
+    # A legacy top-level key (from before providers owned their own keys) must
+    # not leak either. Provider keys are stripped below.
+    out.pop("api_key", None)
+    # api_key is deliberately NOT included: secrets stay on the server and are
+    # write-only from the browser's perspective. `has_key` distinguishes a saved
+    # key from one inherited via the server's environment (`key_source: env`).
+    out["providers"] = [_public_provider(p)
+                        for p in s.get("providers", []) if isinstance(p, dict)]
+    out["shared_providers"] = [
+        _public_provider(p, shared_by=p.get("shared_by"), editable=False)
+        for p in s.get("shared_providers", []) if isinstance(p, dict)
+    ]
     return out
 
 
@@ -1042,6 +1474,57 @@ def _promote_photo(tmp_path: str) -> str | None:
         return dest
     except (OSError, shutil.Error):
         return None
+
+
+def _stored_photo_paths(stored) -> list[str]:
+    """Full stored paths for a meal's photo column (one path or a JSON list)."""
+    if not stored:
+        return []
+    if isinstance(stored, str) and stored.lstrip().startswith("["):
+        try:
+            items = json.loads(stored)
+        except ValueError:
+            items = [stored]
+    else:
+        items = [stored]
+    return [str(p) for p in items if p]
+
+
+def _find_photo_file(path: str) -> str | None:
+    """Resolve a stored photo path, including legacy basename-only rows."""
+    if os.path.isfile(path):
+        return path
+    base = os.path.basename(path)
+    for root, _dirs, files in os.walk(PHOTO_DIR):
+        if base in files:
+            return os.path.join(root, base)
+    return None
+
+
+def _copy_photos(stored, target_date: str) -> str | None:
+    """Duplicate a meal's photo(s) into target_date's store.
+
+    A copy must own its files: DELETE_meal removes the photo, so sharing one
+    path between the original and the copy would break one of them.
+    """
+    paths = _stored_photo_paths(stored)
+    if not paths:
+        return None
+    dest_dir = os.path.join(PHOTO_DIR, target_date)
+    os.makedirs(dest_dir, exist_ok=True)
+    copied = []
+    for src in paths:
+        actual = _find_photo_file(src)
+        if not actual:
+            continue
+        ext = os.path.splitext(actual)[1] or ".jpg"
+        dest = os.path.join(dest_dir, f"{int(time.time())}-{uuid.uuid4().hex[:8]}{ext}")
+        try:
+            shutil.copy2(actual, dest)
+            copied.append(dest)
+        except OSError:
+            continue
+    return _store_photos(copied)
 
 
 def _maybe_adapt(settings: dict, persist: bool = False, force: bool = False,
@@ -1329,6 +1812,9 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.GET_quick_foods(self, q, body)
             elif resource == "rescan" and verb == "POST":
                 st, pl = Api.POST_rescan(self, q, body)
+            elif resource == "meals" and tail and len(parts) > 3 \
+                    and parts[3] == "copy" and verb == "POST":
+                st, pl = Api.POST_copy_meal(self, q, body, tail)
             elif resource == "meals" and verb == "POST":
                 st, pl = Api.POST_meals(self, q, body)
             elif resource == "meals" and tail and verb == "GET":
@@ -1353,6 +1839,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.GET_export(self, q, body)
             elif resource == "test-provider" and verb == "POST":
                 st, pl = Api.POST_test_provider(self, q, body)
+            elif resource == "provider" and tail == "models" and verb == "POST":
+                st, pl = Api.POST_provider_models(self, q, body)
             elif resource == "photo" and tail and verb == "GET":
                 return self._photo(tail)
             else:
@@ -1408,6 +1896,10 @@ class Handler(BaseHTTPRequestHandler):
             data = re.sub(rb'(?:href|src)="/app\.(?:css|js)"',
                           lambda m: m.group(0)[:-1] + b'?v=' + token + b'"',
                           data)
+            # A visible build marker makes "am I looking at a stale cached
+            # shell?" answerable without DevTools. Cached HTML keeps the literal
+            # placeholder; a live server replaces it with the asset token.
+            data = data.replace(b"__APP_BUILD__", token)
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
@@ -1476,11 +1968,11 @@ def main():
         for ip in lan_ips():
             print(f"              {scheme}://{ip}:{args.port}   (phone, same network)")
     s = get_settings()
-    ready = [p["kind"] for p in s.get("providers", [])
-             if os.environ.get({"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
-                                "groq": "GROQ_API_KEY",
-                                "qwenplan": "QWENPLAN_API_KEY"}.get(p["kind"], ""))]
+    ready = [p["kind"] for p in _effective_providers(s)
+             if p.get("enabled", True) and _provider_ready(p)]
     print(f"  vision:   {', '.join(ready) if ready else 'NONE - running offline stub'}")
+    if not s.get("providers") and not s.get("shared_providers"):
+        print("            configure a provider per user in Settings → AI provider")
     if use_tls:
         print("  tls:      on (HTTPS — iPhone camera will work)")
     print("  Ctrl-C to stop\n")

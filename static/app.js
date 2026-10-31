@@ -267,7 +267,7 @@ function renderStatus(s) {
   const bits = [];
   const ready = (s.providers || []).filter(p => p.configured && p.kind !== 'stub');
   if (!ready.length) {
-    bits.push(['warn', 'No vision provider configured — estimates use the offline placeholder. Add a key in Settings.']);
+    bits.push(['warn', 'No AI provider configured — estimates use the offline placeholder. Set one up in Settings.']);
   }
   const tr = s.trend || {};
   if (tr.reliable && tr.slope_kg_per_week != null) {
@@ -360,6 +360,8 @@ function renderGroups(groups, meals) {
 const esc = (s) => String(s || '').replace(/[&<>"]/g, ch =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : '';
+const iconSvg = (name) =>
+  `<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
 
 // ------------------------------------------------------------- meal actions
 $('meal-groups').addEventListener('click', async (e) => {
@@ -387,6 +389,11 @@ $('meal-groups').addEventListener('click', async (e) => {
         items: meal.items || [], ts: meal.ts, date: meal.date,
       },
       provider: meal.provider, model: meal.model, editingId: id,
+      // Carry the saved photo list through this path too; otherwise opening a
+      // today meal via the pencil hides the Rescan button even though it has
+      // an image. (Past-day taps pass the whole meal and already work.)
+      photos: (meal.photos && meal.photos.length) ? meal.photos
+        : (meal.photo ? [meal.photo] : []),
       photoUrl: meal.photo ? `/api/photo/${encodeURIComponent(meal.photo)}` : null,
     });
   }
@@ -621,6 +628,7 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
     : (stagedForSave && stagedForSave.length) ? stagedForSave.slice()
     : (pendingPhoto ? [pendingPhoto] : []);
   if ($('btn-rescan')) $('btn-rescan').hidden = reviewPhotos.length === 0;
+  if ($('btn-copy-meal')) $('btn-copy-meal').hidden = !editingId;
 
   // Cross-check: a discriminative model's view of whether this total fits the
   // photo. Shown only when it disagrees, so a clean estimate stays quiet.
@@ -763,6 +771,30 @@ $('btn-rescan').addEventListener('click', async () => {
   }
 });
 
+// Duplicate the saved meal (including a private copy of its photo) to today.
+// The copy is created server-side, so the original row is never moved.
+$('btn-copy-meal').addEventListener('click', async () => {
+  const editing = Number($('review-sheet').dataset.editing);
+  if (!editing) return;
+  const btn = $('btn-copy-meal');
+  btn.disabled = true;
+  try {
+    await api(`meals/${editing}/copy`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: todayISO() }),
+    });
+    viewDate = '';
+    closeSheets();
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    toast('Copied to today');
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 $('btn-add-item').addEventListener('click', () => {
   compItems.push({ name: '', grams: 0, calories: 0, protein: 0, carbs: 0, fat: 0 });
   renderCompEditor();
@@ -839,7 +871,7 @@ $('btn-save-review').addEventListener('click', async () => {
 });
 
 // -------------------------------------------------------------- manual entry
-// (Manual entry is opened from the Add-meal sheet's 'Enter values'.)
+// (Manual entry is opened from the Add-meal sheet's 'Manual' button.)
 $('btn-cancel-manual').addEventListener('click', closeSheets);
 $('manual-sheet').addEventListener('click', (e) => { if (e.target.id === 'manual-sheet') closeSheets(); });
 
@@ -1299,95 +1331,394 @@ function renderSettings() {
   $('btn-unlock').textContent = s.calorie_target ? 'locked' : 'auto';
   syncWeightDock();
 
+  const buildLine = $('app-build-line');
+  if (buildLine) {
+    const token = document.querySelector('meta[name="app-build"]')?.content || '';
+    const ms = Number(token) * 1000;
+    buildLine.textContent = token && !token.startsWith('__') && isFinite(ms)
+      ? `Build ${new Date(ms).toLocaleString()}` : '';
+    buildLine.hidden = !buildLine.textContent;
+  }
+
   renderProviders();
 }
 
-// Editable working copy of the provider chain. Kept separate from `state` so a
-// half-finished edit cannot leak into other renders, and so Cancel/reload
-// simply re-reads the saved list.
-let provDraft = null;
+// Provider presets. `base` is a UI convenience only: blank means "let the
+// server use its env/default" (relevant for Qwen Token Plan hosts).
+const PROVIDER_PRESETS = {
+  openrouter: { label: 'OpenRouter', base: 'https://openrouter.ai/api/v1', model: '' },
+  qwenplan: { label: 'Qwen Token Plan', base: '', model: 'qwen3.8-flash' },
+  openai: { label: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  groq: { label: 'Groq', base: 'https://api.groq.com/openai/v1',
+          model: 'meta-llama/llama-4-scout-17b-16e-instruct' },
+  gemini: { label: 'Google Gemini',
+            base: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash' },
+  ollama: { label: 'Ollama', base: 'http://127.0.0.1:11434',
+            model: 'llama3.2-vision:11b' },
+  custom: { label: 'OpenAI-compatible', base: '', model: '' },
+  stub: { label: 'Offline placeholder', base: '', model: '' },
+};
+
+let providerEditId = null;      // null = adding; otherwise the saved entry's id
+let providerModels = new Map(); // model id -> metadata returned by /provider/models
+
+function providerLabel(kind) {
+  return (PROVIDER_PRESETS[kind] && PROVIDER_PRESETS[kind].label) ||
+    (kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : 'Provider');
+}
+
+function providerNeedsKey(kind) {
+  // Custom endpoints may be unauthenticated (LM Studio, a local gateway, ...).
+  return !['ollama', 'stub', 'custom'].includes(kind);
+}
+
+function providerAcceptsKey(kind) {
+  return !['ollama', 'stub'].includes(kind);
+}
+
+function providerBadge(p, st) {
+  if (p.enabled === false) return 'off';
+  if (st.configured) return 'ready';
+  if (p.has_key || p.key_source) return 'check';
+  if (providerNeedsKey(p.kind)) return 'no key';
+  return 'offline';
+}
+
+function priceLabel(pricing) {
+  if (!pricing || pricing.prompt == null || pricing.prompt === '') return '';
+  const n = Number(pricing.prompt);
+  if (!isFinite(n)) return '';
+  if (n === 0) return 'free';
+  return '$' + (n * 1e6).toFixed(2) + '/M';
+}
+
+function modelLabel(m) {
+  const bits = [];
+  if (m.name && m.name !== m.id) bits.push(m.name);
+  if (m.context_length) {
+    const n = Number(m.context_length);
+    bits.push(n >= 1000 ? Math.round(n / 1000) + 'k ctx' : n + ' ctx');
+  }
+  const price = priceLabel(m.pricing);
+  if (price) bits.push(price);
+  if (m.vision === true) bits.push('vision');
+  return bits.join(' · ');
+}
+
+function providerStatusKey(p) {
+  return (p.shared_by || '') + '|' + (p.id || '');
+}
 
 function renderProviders() {
   const host = $('provider-list');
   if (!host) return;
-  const list = provDraft || (state?.settings?.providers || []);
-  if (provDraft) provDraft.forEach((p, i) => { p._status = (state?.providers || [])[i] || {}; });
+  const list = state?.settings?.providers || [];
+  const shared = state?.settings?.shared_providers || [];
+  const status = {};
+  (state?.providers || []).forEach(p => { status[providerStatusKey(p)] = p; });
+
+  const empty = $('provider-empty');
+  empty.hidden = list.length > 0;
+  const emptyText = empty.querySelector('p');
+  if (emptyText) {
+    emptyText.textContent = shared.length
+      ? 'No provider of your own yet — estimates fall back to the shared connections below.'
+      : 'No AI provider yet — estimates use the offline placeholder.';
+  }
+
   host.innerHTML = list.map((p, i) => {
-    const st = p._status || {};
-    const known = ['qwenplan', 'groq', 'openai', 'gemini', 'ollama'].includes(p.kind);
-    return `<div class="prov-row" data-i="${i}">
+    const st = status[providerStatusKey(p)] || {};
+    const badge = providerBadge(p, st);
+    const keyNote = p.key_source === 'saved' ? 'key saved'
+      : p.key_source === 'env' ? 'server key'
+      : providerNeedsKey(p.kind) ? 'no key' : '';
+    const shareNote = (p.shared && p.enabled !== false) ? 'shared with everyone' : '';
+    const sub = [p.model || 'default model', keyNote, shareNote].filter(Boolean).join(' · ')
+      + (p.base_url ? ' · ' + p.base_url : '');
+    return `<div class="prov-row${p.enabled === false ? ' prov-off' : ''}" data-id="${esc(p.id)}">
       <div class="prov-top">
-        <span class="prov-name">${esc(p.kind)}</span>
-        <span class="badge ${st.configured ? 'on' : ''}">${
-          p.enabled === false ? 'off' : st.configured ? 'ready' : known ? 'no key' : 'offline'}</span>
-        <label class="prov-en"><input type="checkbox" data-toggle="${i}" ${p.enabled === false ? '' : 'checked'}>use</label>
-        <button class="ghost tiny" data-up="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
-        <button class="ghost tiny" data-down="${i}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
-        <button class="ghost tiny prov-del" data-del="${i}" ${known ? '' : 'disabled'} aria-label="Remove">✕</button>
+        <span class="prov-name">${esc(providerLabel(p.kind))}</span>
+        <span class="badge ${badge === 'ready' ? 'on' : ''}">${badge}</span>
+        <span class="prov-actions">
+          <label class="prov-en"><input type="checkbox" data-toggle="${esc(p.id)}"
+            ${p.enabled === false ? '' : 'checked'}>use</label>
+          <button class="ghost tiny" data-up="${esc(p.id)}" ${i === 0 ? 'disabled' : ''}
+            aria-label="Move up">↑</button>
+          <button class="ghost tiny" data-down="${esc(p.id)}" ${i === list.length - 1 ? 'disabled' : ''}
+            aria-label="Move down">↓</button>
+          <button class="ghost tiny" data-edit="${esc(p.id)}">${iconSvg('pencil')}Edit</button>
+        </span>
       </div>
-      <div class="prov-fields">
-        <label class="fld">Model<input data-f="model" data-i="${i}" value="${esc(p.model || '')}"
-          placeholder="${known ? 'model id' : '—'}" ${known ? '' : 'disabled'}></label>
-        <label class="fld">Base URL<input data-f="base_url" data-i="${i}" value="${esc(p.base_url || '')}"
-          placeholder="from server env" ${known ? '' : 'disabled'}></label>
-      </div>
+      <div class="prov-sub">${esc(sub)}</div>
     </div>`;
-  }).join('') || '<p class="hint">No providers — add one below.</p>';
+  }).join('');
+
+  const sharedWrap = $('shared-provider-wrap');
+  const sharedHost = $('shared-provider-list');
+  if (sharedWrap) sharedWrap.hidden = shared.length === 0;
+  if (sharedHost) {
+    sharedHost.innerHTML = shared.map(p => {
+      const st = status[providerStatusKey(p)] || {};
+      const badge = providerBadge(p, st);
+      const keyNote = p.key_source === 'saved' ? 'uses their key'
+        : p.key_source === 'env' ? 'server key'
+        : providerNeedsKey(p.kind) ? 'no key' : '';
+      const sub = [`Shared by ${p.shared_by || 'another user'}`,
+                   p.model || 'default model', keyNote]
+        .filter(Boolean).join(' · ') + (p.base_url ? ' · ' + p.base_url : '');
+      return `<div class="prov-row" data-id="${esc(p.id)}">
+        <div class="prov-top">
+          <span class="prov-name">${esc(providerLabel(p.kind))}</span>
+          <span class="badge ${badge === 'ready' ? 'on' : ''}">${badge}</span>
+        </div>
+        <div class="prov-sub">${esc(sub)}</div>
+      </div>`;
+    }).join('');
+  }
 }
 
-$('provider-list').addEventListener('input', (e) => {
-  const inp = e.target.closest('input[data-f]'); if (!inp || !provDraft) return;
-  provDraft[+inp.dataset.i][inp.dataset.f] = inp.value.trim();
-});
+async function putProviders(list, msg) {
+  const clean = list.map(p => {
+    const out = { id: p.id || '', kind: p.kind, model: p.model || '',
+                  base_url: p.base_url || '', enabled: p.enabled !== false,
+                  shared: p.shared === true };
+    if (p._newKey) out.api_key = p._newKey;
+    if (p._clearKey) out.clear_key = true;
+    return out;
+  });
+  await api('settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providers: clean }) });
+  await refresh();
+  if ($('view-settings').classList.contains('active')) renderSettings();
+  if (msg) toast(msg);
+}
+
+async function moveProvider(id, delta) {
+  const list = JSON.parse(JSON.stringify(state?.settings?.providers || []));
+  const i = list.findIndex(p => p.id === id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  try { await putProviders(list); } catch (err) { toast(err.message, true); }
+}
+
+async function toggleProvider(id, enabled) {
+  const list = JSON.parse(JSON.stringify(state?.settings?.providers || []));
+  const p = list.find(x => x.id === id);
+  if (!p) return;
+  p.enabled = enabled;
+  try { await putProviders(list); } catch (err) { toast(err.message, true); renderProviders(); }
+}
+
 $('provider-list').addEventListener('click', (e) => {
-  if (!provDraft) return;
-  const mv = (from, to) => { const [x] = provDraft.splice(from, 1); provDraft.splice(to, 0, x); renderProviders(); };
-  const up = e.target.closest('[data-up]'), dn = e.target.closest('[data-down]'), rm = e.target.closest('[data-del]');
-  if (up) mv(+up.dataset.up, +up.dataset.up - 1);
-  else if (dn) mv(+dn.dataset.down, +dn.dataset.down + 1);
-  else if (rm && !rm.disabled) { provDraft.splice(+rm.dataset.del, 1); renderProviders(); }
+  const edit = e.target.closest('[data-edit]');
+  const up = e.target.closest('[data-up]');
+  const dn = e.target.closest('[data-down]');
+  if (edit) openProviderSheet(edit.dataset.edit);
+  else if (up) moveProvider(up.dataset.up, -1);
+  else if (dn) moveProvider(dn.dataset.down, 1);
 });
+
 $('provider-list').addEventListener('change', (e) => {
-  const t = e.target.closest('[data-toggle]'); if (!t || !provDraft) return;
-  provDraft[+t.dataset.toggle].enabled = t.checked;
-  renderProviders();
+  const t = e.target.closest('[data-toggle]');
+  if (t) toggleProvider(t.dataset.toggle, t.checked);
 });
 
-// Editing starts on demand: the list is read-only until "Edit" is pressed so an
-// accidental tap can't reorder the chain that decides which model answers.
-$('btn-edit-providers')?.addEventListener('click', () => {
-  // Providers are stored in the SHARED settings blob, not per person: changing
-  // the chain here changes it for every family member. Say so once, before the
-  // first edit, because "my estimates stopped working" is otherwise baffling.
-  if (!provDraft) toast('Providers are shared by everyone using this server');
-  provDraft = JSON.parse(JSON.stringify(state.settings.providers || []));
-  renderProviders();
-  $('btn-save-providers').hidden = false;
-  $('prov-add-wrap').hidden = false;
+function updateProviderSheet() {
+  const kind = $('prov-kind').value;
+  const p = (state?.settings?.providers || []).find(x => x.id === providerEditId);
+  const preset = PROVIDER_PRESETS[kind] || {};
+  const needsKey = providerNeedsKey(kind);
+  const acceptsKey = providerAcceptsKey(kind);
+  // A saved key belongs to the old provider kind. Changing OpenAI -> OpenRouter
+  // must not claim "leave blank to keep it"; the server intentionally drops it.
+  const sameKind = !p || p.kind === kind;
+  const savedKey = !!(p && p.has_key && sameKind);
+  const envKey = !!(p && p.key_source === 'env' && sameKind);
+  $('prov-base-wrap').hidden = kind === 'stub';
+  $('prov-model-wrap').hidden = kind === 'stub';
+  $('prov-key-wrap').hidden = !acceptsKey;
+  $('btn-load-models').hidden = kind === 'stub';
+  $('prov-share-wrap').hidden = kind === 'stub';
+  $('prov-share-hint').hidden = kind === 'stub';
+  $('prov-base').placeholder = preset.base || (kind === 'qwenplan'
+    ? 'server default (DashScope)' : 'https://provider.example/v1');
+  $('prov-key').placeholder = savedKey ? '•••••••• saved — leave blank to keep'
+    : envKey ? 'using the server key — enter to override'
+    : needsKey ? 'paste key' : 'optional for local servers';
+
+  let keyHint = '';
+  if (!acceptsKey) keyHint = '';
+  else if (savedKey) keyHint = 'A key is saved on the server. Leave this blank to keep it, or paste a new key to replace it.';
+  else if (envKey) keyHint = `This provider currently uses the server's ${providerEnvName(kind)} key. Paste a key to override it for your account.`;
+  else if (kind === 'openrouter') keyHint = 'Create a key at openrouter.ai/keys. It is stored on this server and never sent back to the browser.';
+  else if (kind === 'custom') keyHint = 'Optional: leave blank for a local server that does not require authentication.';
+  else keyHint = 'Stored on this server and never sent back to the browser.';
+  $('prov-key-hint').textContent = keyHint;
+
+  $('prov-clear-wrap').hidden = !savedKey;
+  if (kind === 'stub') {
+    $('prov-model-hint').textContent = 'The offline placeholder is always available as a last resort.';
+  } else if (providerModels.size) {
+    $('prov-model-hint').textContent = `${providerModels.size} models loaded — type to filter or pick one.`;
+  } else if (kind === 'openrouter') {
+    $('prov-model-hint').textContent = 'Click Load to fetch OpenRouter\'s image-capable models, or paste an exact model ID.';
+  } else if (kind === 'ollama') {
+    $('prov-model-hint').textContent = 'Run ollama pull first; Load lists installed models.';
+  } else if (kind === 'custom') {
+    $('prov-model-hint').textContent = 'Use the exact model ID your endpoint expects.';
+  } else {
+    $('prov-model-hint').textContent = 'Load the model list or paste the provider\'s model ID.';
+  }
+}
+
+function providerEnvName(kind) {
+  return { gemini: 'GEMINI_API_KEY', openai: 'OPENAI_API_KEY', groq: 'GROQ_API_KEY',
+           qwenplan: 'QWENPLAN_API_KEY', openrouter: 'OPENROUTER_API_KEY' }[kind] || 'environment';
+}
+
+function openProviderSheet(id = null, presetKind = null) {
+  const p = id ? (state?.settings?.providers || []).find(x => x.id === id) : null;
+  providerEditId = p ? p.id : null;
+  providerModels = new Map();
+  $('prov-model-options').innerHTML = '';
+  const kind = p ? p.kind : (presetKind || 'openrouter');
+  $('prov-kind').value = kind;
+  $('prov-base').value = p ? (p.base_url || '') : (PROVIDER_PRESETS[kind]?.base || '');
+  $('prov-model').value = p ? (p.model || '') : (PROVIDER_PRESETS[kind]?.model || '');
+  $('prov-key').value = '';
+  $('prov-enabled').checked = p ? p.enabled !== false : true;
+  $('prov-share').checked = p ? p.shared === true : false;
+  $('prov-clear-key').checked = false;
+  $('btn-prov-delete').hidden = !p;
+  $('prov-sheet-title').textContent = p ? 'Edit provider' : 'Add provider';
+  $('btn-prov-save').innerHTML = iconSvg('check') + (p ? 'Save changes' : 'Add provider');
+  updateProviderSheet();
+  $('provider-sheet').hidden = false;
+}
+
+function closeProviderSheet() {
+  $('provider-sheet').hidden = true;
+  $('prov-key').value = '';
+  providerEditId = null;
+  providerModels = new Map();
+  $('prov-model-options').innerHTML = '';
+}
+
+$('btn-add-provider')?.addEventListener('click', () => openProviderSheet(null, 'openrouter'));
+$('btn-setup-openrouter')?.addEventListener('click', () => openProviderSheet(null, 'openrouter'));
+$('btn-prov-cancel')?.addEventListener('click', closeProviderSheet);
+$('provider-sheet')?.addEventListener('click', (e) => {
+  if (e.target.id === 'provider-sheet') closeProviderSheet();
 });
 
-$('prov-add-kind')?.addEventListener('change', (e) => {
-  const kind = e.target.value; if (!kind || !provDraft) return;
-  if (provDraft.some(p => p.kind === kind)) { toast(kind + ' is already in the list', true); return; }
-  provDraft.push({ kind, model: '', base_url: '', enabled: true });
-  e.target.value = '';
-  renderProviders();
+$('prov-kind')?.addEventListener('change', () => {
+  const kind = $('prov-kind').value;
+  const preset = PROVIDER_PRESETS[kind] || {};
+  $('prov-base').value = preset.base || '';
+  $('prov-model').value = preset.model || '';
+  providerModels = new Map();
+  $('prov-model-options').innerHTML = '';
+  updateProviderSheet();
 });
 
-$('btn-save-providers')?.addEventListener('click', async () => {
-  if (!provDraft) return;
+$('prov-model')?.addEventListener('input', () => {
+  const m = providerModels.get($('prov-model').value.trim());
+  if (m) $('prov-model-hint').textContent = modelLabel(m);
+});
+
+$('btn-load-models')?.addEventListener('click', async () => {
+  const btn = $('btn-load-models');
+  const kind = $('prov-kind').value;
+  const base = $('prov-base').value.trim();
+  const key = $('prov-key').value.trim();
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
   try {
-    const clean = provDraft.map(p => ({ kind: p.kind, model: p.model || undefined,
-                                        base_url: p.base_url || undefined,
-                                        enabled: p.enabled !== false }));
-    await api('settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ providers: clean }) });
-    provDraft = null;
-    $('btn-save-providers').hidden = true;
-    $('prov-add-wrap').hidden = true;
-    renderProviders();   // back to read-only view of the saved list
-    toast('Providers saved');
-    await refresh();
+    const res = await api('provider/models', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, base_url: base || undefined,
+                             api_key: key || undefined,
+                             provider_id: providerEditId || undefined }),
+    });
+    const models = res.models || [];
+    providerModels = new Map(models.map(m => [m.id, m]));
+    $('prov-model-options').innerHTML = models.map(m => {
+      const price = priceLabel(m.pricing);
+      return `<option value="${esc(m.id)}" label="${esc((m.name || m.id) + (price ? ' — ' + price : ''))}"></option>`;
+    }).join('');
+    $('prov-model-hint').textContent = models.length
+      ? `${models.length} models loaded — type to filter or pick one.`
+      : 'This provider returned no models — paste a model ID instead.';
+  } catch (err) {
+    $('prov-model-hint').textContent = 'Could not load models — you can still paste an ID.';
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+});
+
+$('btn-prov-save')?.addEventListener('click', async () => {
+  const kind = $('prov-kind').value;
+  const base = $('prov-base').value.trim();
+  const model = $('prov-model').value.trim();
+  const key = providerAcceptsKey(kind) ? $('prov-key').value.trim() : '';
+  const enabled = $('prov-enabled').checked;
+  const clearKey = providerAcceptsKey(kind) &&
+    !$('prov-clear-wrap').hidden && $('prov-clear-key').checked;
+  const shared = kind !== 'stub' && $('prov-share').checked;
+  if (!kind) { toast('Choose a provider type', true); return; }
+  const prevProvider = providerEditId
+    ? (state?.settings?.providers || []).find(p => p.id === providerEditId) : null;
+  const previouslyShared = !!(prevProvider && prevProvider.shared &&
+    prevProvider.kind === kind);
+  if (shared && !previouslyShared) {
+    const ok = confirm('Share this AI connection with everyone on this server?\n\n' +
+      'Anyone signed in can use it as a fallback, and it will spend your provider quota. ' +
+      'You can stop sharing at any time.');
+    if (!ok) return;
+  }
+  if (base && !/^https?:\/\/\S+$/i.test(base)) {
+    toast('Base URL must start with http:// or https://', true); return;
+  }
+  if (kind === 'custom' && (!base || !model)) {
+    toast('Custom endpoints need a base URL and a model', true); return;
+  }
+  if (kind === 'openrouter' && !model) {
+    toast('Choose a model (or click Load)', true); return;
+  }
+  const list = JSON.parse(JSON.stringify(state?.settings?.providers || []));
+  let entry;
+  if (providerEditId) {
+    const idx = list.findIndex(p => p.id === providerEditId);
+    if (idx < 0) { toast('That provider no longer exists', true); closeProviderSheet(); return; }
+    entry = list[idx];
+    entry.kind = kind; entry.model = model; entry.base_url = base;
+    entry.enabled = enabled; entry.shared = shared;
+  } else {
+    entry = { id: '', kind, model, base_url: base, enabled, shared };
+    list.push(entry);
+  }
+  if (key) entry._newKey = key;
+  if (clearKey && !key) entry._clearKey = true;
+  try {
+    await putProviders(list, 'Provider saved');
+    closeProviderSheet();
+  } catch (err) { toast(err.message, true); }
+});
+
+$('btn-prov-delete')?.addEventListener('click', async () => {
+  if (!providerEditId) return;
+  const label = providerLabel((state?.settings?.providers || [])
+    .find(p => p.id === providerEditId)?.kind);
+  if (!confirm(`Remove ${label}?`)) return;
+  const list = (state?.settings?.providers || []).filter(p => p.id !== providerEditId);
+  try {
+    await putProviders(list, 'Provider removed');
+    closeProviderSheet();
   } catch (err) { toast(err.message, true); }
 });
 
@@ -1454,9 +1785,13 @@ $('btn-test').addEventListener('click', async () => {
   out.textContent = 'Testing…';
   try {
     const res = await api('test-provider', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    out.textContent = res.results.map(r =>
-      r.ok ? `✓ ${r.kind} (${r.model}) — ${r.ms}ms`
-           : `✗ ${r.kind} (${r.model}) — ${r.error}`).join('\n');
+    const results = res.results || [];
+    const label = (r) => `${providerLabel(r.kind)} (${r.model})` +
+      (r.shared_by ? ` · shared by ${r.shared_by}` : '');
+    out.textContent = results.length
+      ? results.map(r => r.ok ? `✓ ${label(r)} — ${r.ms}ms`
+                              : `✗ ${label(r)} — ${r.error}`).join('\n')
+      : 'No remote providers to test. Add one first.';
   } catch (err) { out.textContent = err.message; }
 });
 
@@ -1483,11 +1818,15 @@ refresh();
 // wedged fetch dispatcher (observed: every POST hangs forever).
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistration().then((reg) => {
-    if (!reg) { navigator.serviceWorker.register('/sw.js').catch(() => {}); return; }
+    const opts = { updateViaCache: 'none' };
+    if (!reg) { navigator.serviceWorker.register('/sw.js', opts).catch(() => {}); return; }
+    // Force an update check even when the page itself came from the HTTP/SW
+    // cache: hard-refresh does not necessarily re-fetch the worker script.
+    reg.update().catch(() => {});
     // If an update is pending or the controlling worker predates this build,
     // drop it and register fresh — a half-dead worker wedges all fetches.
     if (reg.waiting || reg.installing) {
-      reg.unregister().then(() => navigator.serviceWorker.register('/sw.js')).catch(() => {});
+      reg.unregister().then(() => navigator.serviceWorker.register('/sw.js', opts)).catch(() => {});
     }
   });
 }
