@@ -1360,10 +1360,37 @@ function renderHealthToken() {
   $('btn-health-token').innerHTML = iconSvg('plus') +
     (configured ? 'Regenerate token' : 'Generate token');
   $('btn-health-revoke').hidden = !configured;
-  const url = location.origin + '/health/day';
-  $('health-endpoint').textContent = url;
-  document.querySelectorAll('.health-endpoint-copy').forEach(el => {
-    el.textContent = url;
+
+  const hx = state?.health_export || {};
+  const status = $('health-export-status');
+  if (configured) {
+    const bits = [];
+    if (hx.today_confirmed) {
+      bits.push('Today is already confirmed exported — running the Shortcut again would duplicate Health samples.');
+    } else if (hx.today_requested) {
+      bits.push('Today was requested but not confirmed; re-run only if the Shortcut failed.');
+    }
+    bits.push(hx.last_export_date
+      ? `Last confirmed export: ${hx.last_export_date}.`
+      : 'No confirmed export yet.');
+    if (hx.pending_count) {
+      bits.push(`${hx.pending_count} day${hx.pending_count === 1 ? '' : 's'} pending.`);
+    }
+    status.textContent = bits.join(' ');
+    status.hidden = false;
+    status.classList.toggle('warn', !!(hx.today_confirmed || hx.today_requested || hx.pending_count));
+  } else {
+    status.hidden = true;
+    status.textContent = '';
+  }
+
+  const origin = location.origin;
+  $('health-pending-url').textContent = origin + '/health/pending';
+  document.querySelectorAll('.health-endpoint-pending').forEach(el => {
+    el.textContent = origin + '/health/pending';
+  });
+  document.querySelectorAll('.health-endpoint-ack').forEach(el => {
+    el.textContent = origin + '/health/ack';
   });
 }
 

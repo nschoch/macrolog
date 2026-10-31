@@ -199,9 +199,10 @@ Everything is editable after the fact, and every edit feeds loop #2.
 ### Apple Health
 
 Direct HealthKit access is impossible from a PWA. For an iOS Shortcut that
-writes daily food totals, weight, and exercise into Apple Health, use the
-read-only token endpoint described in [docs/APPLE_HEALTH.md](docs/APPLE_HEALTH.md).
-Generate the token in **Settings → Apple Health**.
+writes daily food totals, weight, body fat, and exercise into Apple Health — and
+automatically catches up missed days — use the token endpoints described in
+[docs/APPLE_HEALTH.md](docs/APPLE_HEALTH.md). Generate the token in
+**Settings → Apple Health**.
 
 ## Layout
 

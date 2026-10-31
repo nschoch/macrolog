@@ -176,6 +176,7 @@
       <p class="hint">Read-only endpoint for an iOS Shortcut. The token can read
         this account's meals, weight, and exercise; it cannot change anything.</p>
       <p class="hint" id="health-token-state">No token yet.</p>
+      <p class="hint" id="health-export-status" hidden></p>
       <div class="sheet-btns prov-btns">
         <button class="ghost tiny" id="btn-health-token"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Generate token</button>
         <button class="ghost tiny" id="btn-health-revoke" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-trash"></use></svg>Revoke token</button>
@@ -187,25 +188,35 @@
             <button class="ghost tiny" id="btn-copy-health-token">Copy</button>
           </div>
         </label>
-        <p class="hint">Endpoint: <code id="health-endpoint">/health/day</code><br>
+        <p class="hint">Read endpoint:
+          <code id="health-pending-url">/health/pending</code><br>
           Header: <code>Authorization: Bearer &lt;token&gt;</code></p>
       </div>
       <details class="totals-toggle">
-        <summary>Shortcut recipe</summary>
+        <summary>Shortcut recipe (daily + automatic backfill)</summary>
         <ol class="health-steps">
           <li>Shortcuts → <b>+</b> → <b>Get Contents of URL</b>.
-            URL: <code class="health-endpoint-copy">/health/day</code>;
+            URL: <code class="health-endpoint-pending">/health/pending</code>;
             method <b>GET</b>; header <code>Authorization</code> =
             <code>Bearer &lt;token&gt;</code>.</li>
-          <li><b>Get Dictionary Value</b> for <code>totals.calories</code>,
-            <code>totals.protein</code>, <code>totals.carbs</code>,
-            <code>totals.fat</code>, <code>totals.fiber</code>.</li>
-          <li><b>Log Health Sample</b> for Dietary Energy (kcal), Protein (g),
-            Carbohydrates (g), Total Fat (g), and Fiber (g).</li>
-          <li>Optional: <code>weight.kg</code> → Body Mass; exercise is at
-            <code>exercise_calories</code>. Run manually or from a daily
-            automation.</li>
+          <li><b>Repeat with Each</b> item in <code>pending</code>:
+            <b>Log Health Sample</b> for Dietary Energy (kcal), Protein (g),
+            Carbohydrates (g), Total Fat (g), and Fiber (g). Set each sample's
+            date to <code>item.sample_at</code> (or its <code>date</code> at
+            noon) so backfilled days land on the right day. Optional:
+            <code>weight.kg</code> → Body Mass and
+            <code>body_fat_pct</code> → Body Fat Percentage.</li>
+          <li>After each day's samples, <b>Get Contents of URL</b> with URL
+            <code class="health-endpoint-ack">/health/ack</code>, method
+            <b>POST</b>, same auth header, JSON body
+            <code>{"dates": [item.date]}</code>. Confirmed days are skipped
+            next time.</li>
+          <li>Run manually or from a daily automation. The same Shortcut
+            catches up every unconfirmed day.</li>
         </ol>
+        <p class="hint">The app records a day as confirmed only after the
+          Shortcut posts to <code>/health/ack</code>; it cannot see whether
+          HealthKit actually saved the sample.</p>
       </details>
     </div>
     <div class="save-bar"><button id="btn-save" class="primary"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg>Save settings</button></div>

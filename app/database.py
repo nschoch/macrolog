@@ -75,6 +75,18 @@ CREATE TABLE IF NOT EXISTS exercises (
     calories    REAL    NOT NULL DEFAULT 0
 );
 
+-- Per-day health export bookkeeping. requested_at is set when the Shortcut
+-- fetches a day; confirmed_at is set only after it acknowledges a successful
+-- HealthKit write. A confirmed day is skipped by the pending/backfill query.
+CREATE TABLE IF NOT EXISTS health_exports (
+    owner        TEXT NOT NULL,
+    date         TEXT NOT NULL,
+    requested_at INTEGER,
+    confirmed_at INTEGER,
+    PRIMARY KEY (owner, date)
+);
+CREATE INDEX IF NOT EXISTS idx_health_exports_owner ON health_exports(owner, date);
+
 CREATE TABLE IF NOT EXISTS estimates (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     meal_id      INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,

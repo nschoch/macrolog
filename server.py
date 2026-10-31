@@ -372,6 +372,7 @@ class Api:
             "groups": group_meals(dicts, int(s.get("meal_gap_minutes") or 45), tz=tz),
             "consumed": consumed, "targets": targets, "trend": trend,
             "settings": _public_settings(s), "providers": providers,
+            "health_export": _health_export_status(owner),
             "active_provider": ready[0] if ready else "stub",
             "exercise": _exercise_total(t, owner),
             "user": getattr(h, "user", None),
@@ -953,6 +954,9 @@ class Api:
             "accuracy": accuracy_summary(db, owner),
             "multipliers": {f: calibration_multipliers(db, f, owner=owner)
                             for f in ("calories", "protein", "carbs", "fat")},
+            "health_exports": [dict(r) for r in db.query(
+                "SELECT date, requested_at, confirmed_at FROM health_exports "
+                "WHERE owner=? ORDER BY date", (owner,))],
         }
 
     @staticmethod
@@ -1427,6 +1431,8 @@ def _health_day_payload(d: str, owner: str) -> dict:
         })
     w = db.one("SELECT date, value FROM weights WHERE owner=? AND date=?",
                (owner, d))
+    bf = db.one("SELECT date, value FROM body_fat WHERE owner=? AND date=?",
+                (owner, d))
     sample_at = datetime.fromisoformat(d + "T12:00:00")
     if APP_TZ is not None:
         sample_at = sample_at.replace(tzinfo=APP_TZ)
@@ -1437,10 +1443,49 @@ def _health_day_payload(d: str, owner: str) -> dict:
         "meals": rows,
         "weight": ({"date": w["date"], "kg": round(float(w["value"]), 2)}
                    if w else None),
+        "body_fat_pct": round(float(bf["value"]), 1) if bf else None,
         "exercise_calories": _exercise_total(d, owner),
         "sample_at": sample_at.isoformat(),
         "units": {"calories": "kcal", "protein": "g", "carbs": "g",
-                  "fat": "g", "fiber": "g", "weight": "kg"},
+                  "fat": "g", "fiber": "g", "weight": "kg",
+                  "body_fat": "%"},
+    }
+
+
+def _health_pending_dates(owner: str) -> list[str]:
+    """Every date with food/weight/body-fat/exercise that is not confirmed."""
+    rows = db.query(
+        "SELECT date FROM meals WHERE owner=? AND date<=? "
+        "UNION SELECT date FROM weights WHERE owner=? AND date<=? "
+        "UNION SELECT date FROM body_fat WHERE owner=? AND date<=? "
+        "UNION SELECT date FROM exercises WHERE owner=? AND date<=? "
+        "ORDER BY date",
+        (owner, today_str(), owner, today_str(), owner, today_str(),
+         owner, today_str()))
+    confirmed = {r["date"] for r in db.query(
+        "SELECT date FROM health_exports WHERE owner=? AND confirmed_at IS NOT NULL",
+        (owner,))}
+    return [r["date"] for r in rows if r["date"] not in confirmed]
+
+
+def _health_export_status(owner: str) -> dict:
+    pending = _health_pending_dates(owner)
+    today = today_str()
+    row = db.one("SELECT requested_at, confirmed_at FROM health_exports "
+                 "WHERE owner=? AND date=?", (owner, today))
+    last = db.one("SELECT MAX(date) d, MAX(confirmed_at) t FROM health_exports "
+                  "WHERE owner=? AND confirmed_at IS NOT NULL", (owner,))
+    return {
+        "today": today,
+        "today_requested": bool(row and row["requested_at"]),
+        "today_confirmed": bool(row and row["confirmed_at"]),
+        "last_export_date": (last["d"] if last else None),
+        "last_export_at": (
+            datetime.fromtimestamp(int(last["t"]), APP_TZ).isoformat(timespec="seconds")
+            if last and last["t"] else None),
+        "pending_count": len(pending),
+        "pending_dates": pending[:10],
+        "pending_oldest": pending[0] if pending else None,
     }
 
 
@@ -1803,6 +1848,8 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if u.path in ("/health/day", "/health/today"):
             return self._health_day(q)
+        if u.path == "/health/pending":
+            return self._health_pending(q)
         if u.path.startswith("/auth/"):
             return self._auth(u.path, q)
         if u.path.startswith("/api/"):
@@ -1819,6 +1866,8 @@ class Handler(BaseHTTPRequestHandler):
         body, err = self._read_body()
         if err:
             return self._json(400, {"error": err})
+        if u.path == "/health/ack":
+            return self._health_ack(body or {})
         return self._route("POST", u.path, parse_qs(u.query), body or {})
 
     def do_PATCH(self):
@@ -1884,10 +1933,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self._json(404, {"error": "unknown auth route"})
 
-    def _health_day(self, q):
+    def _health_token_owner(self):
         auth = self.headers.get("Authorization", "")
         token = auth.split(None, 1)[1].strip() if auth.lower().startswith("bearer ") else ""
-        owner = _owner_for_health_token(token)
+        return _owner_for_health_token(token)
+
+    def _health_day(self, q):
+        owner = self._health_token_owner()
         if not owner:
             return self._json(401, {"error": "invalid health token"})
         d = (q.get("date") or [today_str()])[0]
@@ -1895,7 +1947,74 @@ class Handler(BaseHTTPRequestHandler):
             d = date.fromisoformat(str(d)[:10]).isoformat()
         except ValueError:
             return self._json(400, {"error": "invalid date (use YYYY-MM-DD)"})
-        return self._json(200, _health_day_payload(d, owner))
+        row = db.one("SELECT requested_at, confirmed_at FROM health_exports "
+                     "WHERE owner=? AND date=?", (owner, d))
+        already_requested = bool(row and row["requested_at"])
+        already_confirmed = bool(row and row["confirmed_at"])
+        now = int(time.time())
+        db.execute(
+            "INSERT INTO health_exports(owner,date,requested_at) VALUES(?,?,?) "
+            "ON CONFLICT(owner,date) DO UPDATE SET requested_at=excluded.requested_at",
+            (owner, d, now))
+        payload = _health_day_payload(d, owner)
+        payload["export"] = {
+            "requested_at": now,
+            "confirmed_at": row["confirmed_at"] if row else None,
+            "already_requested": already_requested,
+            "already_confirmed": already_confirmed,
+        }
+        return self._json(200, payload)
+
+    def _health_pending(self, q):
+        owner = self._health_token_owner()
+        if not owner:
+            return self._json(401, {"error": "invalid health token"})
+        try:
+            limit = int((q.get("limit") or ["366"])[0])
+        except ValueError:
+            limit = 366
+        limit = max(1, min(366, limit))
+        pending = _health_pending_dates(owner)
+        days = [_health_day_payload(d, owner) for d in pending[:limit]]
+        status = _health_export_status(owner)
+        return self._json(200, {
+            **status,
+            "count": len(pending),
+            "returned": len(days),
+            "truncated": len(pending) > len(days),
+            "pending": days,
+        })
+
+    def _health_ack(self, body):
+        owner = self._health_token_owner()
+        if not owner:
+            return self._json(401, {"error": "invalid health token"})
+        raw = body.get("dates") if isinstance(body, dict) else None
+        if raw is None and isinstance(body, dict) and body.get("date"):
+            raw = [body["date"]]
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return self._json(400, {"error": "dates must be a YYYY-MM-DD array"})
+        dates = []
+        for value in raw[:366]:
+            try:
+                d = date.fromisoformat(str(value)[:10]).isoformat()
+            except ValueError:
+                return self._json(400, {"error": "invalid date (use YYYY-MM-DD)"})
+            if d not in dates:
+                dates.append(d)
+        if not dates:
+            return self._json(400, {"error": "dates must not be empty"})
+        now = int(time.time())
+        for d in dates:
+            db.execute(
+                "INSERT INTO health_exports(owner,date,requested_at,confirmed_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(owner,date) DO UPDATE SET "
+                "confirmed_at=excluded.confirmed_at, "
+                "requested_at=COALESCE(health_exports.requested_at, excluded.requested_at)",
+                (owner, d, now, now))
+        return self._json(200, {"confirmed": dates, "confirmed_at": now})
 
     def _route(self, verb, path, q, body):
         parts = [p for p in path.strip("/").split("/") if p]

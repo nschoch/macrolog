@@ -259,18 +259,36 @@ try {
     const token = document.getElementById('health-token').value;
     const revealed = !document.getElementById('health-token-reveal').hidden;
     const configured = !!state.settings.health_token_set;
-    const endpoint = document.getElementById('health-endpoint').textContent;
+    const status = document.getElementById('health-export-status').textContent;
+    const statusHidden = document.getElementById('health-export-status').hidden;
+    const pendingUrl = document.getElementById('health-pending-url').textContent;
+    const auth = { 'Authorization': 'Bearer ' + token };
+    const day = await fetch('/health/day', { headers: auth }).then(r => r.json());
+    await fetch('/health/ack', {
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates: [day.date] }),
+    });
+    await refresh();
+    renderSettings();
+    const confirmedStatus = document.getElementById('health-export-status').textContent;
+    const confirmedWarn = document.getElementById('health-export-status').classList.contains('warn');
     document.getElementById('btn-health-revoke').click();
     await new Promise(r => setTimeout(r, 900));
-    return { tokenLen: token.length, revealed, configured, endpoint,
-             revoked: !state.settings.health_token_set,
+    return { tokenLen: token.length, revealed, configured, status, statusHidden, pendingUrl,
+             confirmedStatus, confirmedWarn, revoked: !state.settings.health_token_set,
              revealAfter: document.getElementById('health-token-reveal').hidden };
   })()`);
   check('Apple Health token can be generated and shown once',
         health.tokenLen >= 32 && health.revealed === true && health.configured === true,
         JSON.stringify(health));
-  check('Apple Health endpoint points at /health/day',
-        /\/health\/day$/.test(health.endpoint || ''), health.endpoint);
+  check('Apple Health status shows confirmed/pending state',
+        health.statusHidden === false && /confirmed|pending/i.test(health.status || ''),
+        JSON.stringify(health));
+  check('confirmed export warns against duplicate logging',
+        /already confirmed/i.test(health.confirmedStatus || '') && health.confirmedWarn === true,
+        JSON.stringify(health));
+  check('Apple Health backfill endpoint points at /health/pending',
+        /\/health\/pending$/.test(health.pendingUrl || ''), health.pendingUrl);
   check('Apple Health token can be revoked',
         health.revoked === true && health.revealAfter === true, JSON.stringify(health));
   check('Apple Health token controls produced no JS error',

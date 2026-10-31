@@ -710,6 +710,47 @@ check("health day returns totals and meals",
 check("health day exposes gram units for Health samples",
       (hd.get("units") or {}).get("protein") == "g"
       and (hd.get("units") or {}).get("calories") == "kcal", str(hd.get("units")))
+check("first fetch is not flagged as already exported",
+      (hd.get("export") or {}).get("already_requested") is False
+      and (hd.get("export") or {}).get("already_confirmed") is False,
+      str(hd.get("export")))
+st, pending = req("/health/pending", headers={"Authorization": "Bearer " + ht_token})
+check("pending endpoint lists unconfirmed data days",
+      st == 200 and isinstance(pending.get("pending"), list)
+      and health_date in [d.get("date") for d in pending.get("pending") or []],
+      str(pending)[:180])
+st, no_pending = req("/health/pending")
+check("pending endpoint requires a bearer token", st == 401, str(no_pending)[:100])
+st, hd2 = req("/health/day?date=" + health_date,
+              headers={"Authorization": "Bearer " + ht_token})
+check("second fetch warns it was already requested",
+      (hd2.get("export") or {}).get("already_requested") is True
+      and (hd2.get("export") or {}).get("already_confirmed") is False,
+      str(hd2.get("export")))
+st, ack = req("/health/ack", "POST", {"dates": [health_date]},
+              headers={"Authorization": "Bearer " + ht_token})
+check("health acknowledgement confirms the day",
+      st == 200 and health_date in (ack.get("confirmed") or []), str(ack)[:120])
+st, hd3 = req("/health/day?date=" + health_date,
+              headers={"Authorization": "Bearer " + ht_token})
+check("confirmed day warns against duplicate export",
+      (hd3.get("export") or {}).get("already_confirmed") is True,
+      str(hd3.get("export")))
+st, pending2 = req("/health/pending", headers={"Authorization": "Bearer " + ht_token})
+check("confirmed day is removed from pending backfill",
+      health_date not in [d.get("date") for d in pending2.get("pending") or []]
+      and pending2.get("last_export_date") == health_date,
+      str({k: pending2.get(k) for k in ("last_export_date", "count")}))
+st, state_health = req("/api/state")
+check("state exposes health export status",
+      (state_health.get("health_export") or {}).get("today_confirmed") is True
+      and (state_health.get("health_export") or {}).get("last_export_date") == health_date,
+      str(state_health.get("health_export"))[:160])
+st, bad_ack = req("/health/ack", "POST", {"dates": ["not-a-date"]},
+                  headers={"Authorization": "Bearer " + ht_token})
+check("health ack rejects invalid dates", st == 400, str(bad_ack)[:100])
+st, no_ack = req("/health/ack", "POST", {"dates": [health_date]})
+check("health ack requires a bearer token", st == 401, str(no_ack)[:100])
 st, _ = req("/api/health/token", "DELETE")
 st, old_token = req("/health/day?date=" + health_date,
                     headers={"Authorization": "Bearer " + ht_token})
