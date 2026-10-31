@@ -173,8 +173,9 @@
 
     <div class="card">
       <h3>Apple Health</h3>
-      <p class="hint">Read-only endpoint for an iOS Shortcut. The token can read
-        this account's meals, weight, and exercise; it cannot change anything.</p>
+      <p class="hint">FoodLogger can't write to HealthKit directly. This sets up
+        a Shortcut that logs each pending day; the app tracks what the Shortcut
+        confirms.</p>
       <p class="hint" id="health-token-state">No token yet.</p>
       <p class="hint" id="health-export-status" hidden></p>
       <div class="sheet-btns prov-btns">
@@ -192,32 +193,9 @@
           <code id="health-pending-url">/health/pending</code><br>
           Header: <code>Authorization: Bearer &lt;token&gt;</code></p>
       </div>
-      <details class="totals-toggle">
-        <summary>Shortcut recipe (daily + automatic backfill)</summary>
-        <ol class="health-steps">
-          <li>Shortcuts → <b>+</b> → <b>Get Contents of URL</b>.
-            URL: <code class="health-endpoint-pending">/health/pending</code>;
-            method <b>GET</b>; header <code>Authorization</code> =
-            <code>Bearer &lt;token&gt;</code>.</li>
-          <li><b>Repeat with Each</b> item in <code>pending</code>:
-            <b>Log Health Sample</b> for Dietary Energy (kcal), Protein (g),
-            Carbohydrates (g), Total Fat (g), and Fiber (g). Set each sample's
-            date to <code>item.sample_at</code> (or its <code>date</code> at
-            noon) so backfilled days land on the right day. Optional:
-            <code>weight.kg</code> → Body Mass and
-            <code>body_fat_pct</code> → Body Fat Percentage.</li>
-          <li>After each day's samples, <b>Get Contents of URL</b> with URL
-            <code class="health-endpoint-ack">/health/ack</code>, method
-            <b>POST</b>, same auth header, JSON body
-            <code>{"dates": [item.date]}</code>. Confirmed days are skipped
-            next time.</li>
-          <li>Run manually or from a daily automation. The same Shortcut
-            catches up every unconfirmed day.</li>
-        </ol>
-        <p class="hint">The app records a day as confirmed only after the
-          Shortcut posts to <code>/health/ack</code>; it cannot see whether
-          HealthKit actually saved the sample.</p>
-      </details>
+      <button class="ghost health-guide-btn" id="btn-health-guide">
+        <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-sparkle"></use></svg>Set up Apple Health
+      </button>
     </div>
     <div class="save-bar"><button id="btn-save" class="primary"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg>Save settings</button></div>
   </section>
@@ -409,6 +387,44 @@
     <div class="sheet-btns">
       <button class="ghost" id="btn-cancel-manual">Cancel</button>
       <button class="primary" id="btn-save-manual"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg>Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== APPLE HEALTH GUIDE SHEET ==================== -->
+<div class="sheet-backdrop" id="health-guide-sheet" hidden>
+  <div class="sheet">
+    <div class="sheet-grab"></div>
+    <h3>Set up Apple Health</h3>
+    <p class="hint">The app prepares the data; an iOS Shortcut writes it to
+      Health. One Shortcut handles both today and any missed days.</p>
+    <ol class="health-steps">
+      <li>In the Apple Health card, tap <b>Generate token</b> and copy it.
+        It is shown only once.</li>
+      <li>Open <b>Shortcuts</b> → <b>+</b> → <b>Get Contents of URL</b>.
+        URL: <code class="health-endpoint-pending">/health/pending</code>;
+        method <b>GET</b>; header <code>Authorization</code> =
+        <code>Bearer &lt;token&gt;</code>.</li>
+      <li><b>Repeat with Each</b> item in <code>pending</code>:
+        <b>Log Health Sample</b> for Dietary Energy (kcal), Protein (g),
+        Carbohydrates (g), Total Fat (g), and Fiber (g). Set each sample's
+        date to <code>item.sample_at</code> so backfilled days land on the
+        right day. Optional: <code>weight.kg</code> → Body Mass and
+        <code>body_fat_pct</code> → Body Fat Percentage.</li>
+      <li>After logging each day, <b>Get Contents of URL</b> with URL
+        <code class="health-endpoint-ack">/health/ack</code>, method
+        <b>POST</b>, same auth header, JSON body
+        <code>{"dates": [item.date]}</code>.</li>
+      <li>Run it manually, or add a daily Personal Automation. Confirmed days
+        are skipped automatically.</li>
+    </ol>
+    <p class="hint">The app can't see whether HealthKit actually saved a sample;
+      a day is confirmed only after the Shortcut posts to
+      <code>/health/ack</code>. If it logs but fails before confirming, the next
+      run may duplicate it.</p>
+    <div class="sheet-btns">
+      <button class="ghost" id="btn-health-copy-steps">Copy steps</button>
+      <button class="primary" id="btn-health-guide-close">Done</button>
     </div>
   </div>
 </div>

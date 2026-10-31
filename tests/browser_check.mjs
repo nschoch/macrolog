@@ -97,7 +97,7 @@ try {
   await send('Network.enable');
   // Fresh browser context: start from a clean SW slate so the app registers
   // exactly once (see app.js note about Chrome's wedged-SW failure mode).
-  await evalJson(`navigator.serviceWorker.getRegistrations ? navigator.serviceWorker.getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())).then(() => 'sw cleared') : 'n/a')`).catch(() => {});
+  await evalJson(`navigator.serviceWorker.getRegistrations ? navigator.serviceWorker.getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())).then(() => 'sw cleared')) : 'n/a')`).catch(() => {});
 
   // Disable service-worker registration for this run. Root cause of the
   // endless hangs we chased: headless Chrome ends up with an ACTIVE but
@@ -253,6 +253,7 @@ try {
   // ---- Apple Health token: generate, reveal, revoke ---------------------
   const healthErrs = jsErrors.length;
   const health = await evalJson(`(async () => {
+   try {
     window.confirm = () => true;
     document.getElementById('btn-health-token').click();
     await new Promise(r => setTimeout(r, 900));
@@ -272,11 +273,19 @@ try {
     renderSettings();
     const confirmedStatus = document.getElementById('health-export-status').textContent;
     const confirmedWarn = document.getElementById('health-export-status').classList.contains('warn');
+    document.getElementById('btn-health-guide').click();
+    const guideOpen = !document.getElementById('health-guide-sheet').hidden;
+    const guideText = document.getElementById('health-guide-sheet').textContent;
+    document.getElementById('btn-health-guide-close').click();
+    const guideClosed = document.getElementById('health-guide-sheet').hidden;
     document.getElementById('btn-health-revoke').click();
     await new Promise(r => setTimeout(r, 900));
     return { tokenLen: token.length, revealed, configured, status, statusHidden, pendingUrl,
-             confirmedStatus, confirmedWarn, revoked: !state.settings.health_token_set,
+             confirmedStatus, confirmedWarn, guideOpen, guideClosed,
+             guideHasBackfill: guideText.includes('Repeat with Each') && guideText.includes('health/ack'),
+             revoked: !state.settings.health_token_set,
              revealAfter: document.getElementById('health-token-reveal').hidden };
+   } catch (e) { return { error: String(e), stack: e && e.stack }; }
   })()`);
   check('Apple Health token can be generated and shown once',
         health.tokenLen >= 32 && health.revealed === true && health.configured === true,
@@ -287,6 +296,9 @@ try {
   check('confirmed export warns against duplicate logging',
         /already confirmed/i.test(health.confirmedStatus || '') && health.confirmedWarn === true,
         JSON.stringify(health));
+  check('Apple Health guide opens with backfill instructions',
+        health.guideOpen === true && health.guideClosed === true
+        && health.guideHasBackfill === true, JSON.stringify(health));
   check('Apple Health backfill endpoint points at /health/pending',
         /\/health\/pending$/.test(health.pendingUrl || ''), health.pendingUrl);
   check('Apple Health token can be revoked',

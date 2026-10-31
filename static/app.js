@@ -808,6 +808,7 @@ $('btn-add-item').addEventListener('click', () => {
 });
 
 function closeSheets() {
+  $('health-guide-sheet').hidden = true;
   $('review-sheet').hidden = true;
   $('review-sheet').dataset.editing = '';
   $('review-sheet').dataset.source = '';
@@ -1428,6 +1429,45 @@ $('btn-copy-health-token').addEventListener('click', async () => {
     $('health-token').select();
     try { document.execCommand('copy'); toast('Token copied'); }
     catch (err) { toast('Select and copy the token manually', true); }
+  }
+});
+
+$('btn-health-guide').addEventListener('click', () => {
+  $('health-guide-sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+});
+$('btn-health-guide-close').addEventListener('click', closeSheets);
+$('health-guide-sheet').addEventListener('click', (e) => {
+  if (e.target.id === 'health-guide-sheet') closeSheets();
+});
+
+$('btn-health-copy-steps').addEventListener('click', async () => {
+  const origin = location.origin;
+  const steps = [
+    'Apple Health Shortcut',
+    '',
+    '1. Generate a token in FoodLogger Settings > Apple Health and copy it.',
+    '2. Shortcuts > + > Get Contents of URL',
+    '   URL: ' + origin + '/health/pending',
+    '   Method: GET',
+    '   Header: Authorization: Bearer <paste token>',
+    '3. Repeat with Each item in pending:',
+    '   - Log Health Sample for Dietary Energy (kcal), Protein (g),',
+    '     Carbohydrates (g), Total Fat (g), Fiber (g).',
+    '   - Set each sample date to item.sample_at.',
+    '   - Optional: weight.kg -> Body Mass; body_fat_pct -> Body Fat Percentage.',
+    '4. After each day, POST ' + origin + '/health/ack',
+    '   Header: Authorization: Bearer <paste token>',
+    '   JSON body: {"dates": [item.date]}',
+    '5. Run daily; confirmed days are skipped.',
+    '',
+    'The app cannot see whether HealthKit saved a sample; only /health/ack confirms it.',
+  ].join('\n');
+  try {
+    await navigator.clipboard.writeText(steps);
+    toast('Setup steps copied');
+  } catch (_) {
+    toast('Could not copy; use the steps on screen', true);
   }
 });
 

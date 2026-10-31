@@ -140,6 +140,7 @@ input, select, button { font: inherit; color: inherit; }
 .health-steps li { margin: 6px 0; line-height: 1.45; }
 .health-steps code { word-break: break-all; }
 .hint.warn { color: #fcd34d; }
+.health-guide-btn { width: 100%; margin-top: 10px; }
 
 /* ------------------------------------------------ item auto/manual macros */
 .ir-mode { border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
