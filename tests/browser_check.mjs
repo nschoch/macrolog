@@ -250,6 +250,32 @@ try {
   check('opening/closing the provider sheet has no JS error',
         jsErrors.length === provErrs, jsErrors.slice(provErrs).join(' | ').slice(0, 300));
 
+  // ---- Apple Health token: generate, reveal, revoke ---------------------
+  const healthErrs = jsErrors.length;
+  const health = await evalJson(`(async () => {
+    window.confirm = () => true;
+    document.getElementById('btn-health-token').click();
+    await new Promise(r => setTimeout(r, 900));
+    const token = document.getElementById('health-token').value;
+    const revealed = !document.getElementById('health-token-reveal').hidden;
+    const configured = !!state.settings.health_token_set;
+    const endpoint = document.getElementById('health-endpoint').textContent;
+    document.getElementById('btn-health-revoke').click();
+    await new Promise(r => setTimeout(r, 900));
+    return { tokenLen: token.length, revealed, configured, endpoint,
+             revoked: !state.settings.health_token_set,
+             revealAfter: document.getElementById('health-token-reveal').hidden };
+  })()`);
+  check('Apple Health token can be generated and shown once',
+        health.tokenLen >= 32 && health.revealed === true && health.configured === true,
+        JSON.stringify(health));
+  check('Apple Health endpoint points at /health/day',
+        /\/health\/day$/.test(health.endpoint || ''), health.endpoint);
+  check('Apple Health token can be revoked',
+        health.revoked === true && health.revealAfter === true, JSON.stringify(health));
+  check('Apple Health token controls produced no JS error',
+        jsErrors.length === healthErrs, jsErrors.slice(healthErrs).join(' | ').slice(0, 300));
+
   // Click 1: auto -> lock (server pins 2200 fallback when target was null? see code: locks at s.calorie_target || 2200)
   const errsBefore = jsErrors.length;
   await evalJson(`document.getElementById('btn-unlock').click()`);

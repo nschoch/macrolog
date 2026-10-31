@@ -1348,7 +1348,61 @@ function renderSettings() {
   }
 
   renderProviders();
+  renderHealthToken();
 }
+
+function renderHealthToken() {
+  const s = state?.settings || {};
+  const configured = !!s.health_token_set;
+  $('health-token-state').textContent = configured
+    ? 'Token configured — revoke it to rotate the credential.'
+    : 'No token yet.';
+  $('btn-health-token').innerHTML = iconSvg('plus') +
+    (configured ? 'Regenerate token' : 'Generate token');
+  $('btn-health-revoke').hidden = !configured;
+  const url = location.origin + '/health/day';
+  $('health-endpoint').textContent = url;
+  document.querySelectorAll('.health-endpoint-copy').forEach(el => {
+    el.textContent = url;
+  });
+}
+
+$('btn-health-token').addEventListener('click', async () => {
+  try {
+    const data = await api('health/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    $('health-token').value = data.token || '';
+    $('health-token-reveal').hidden = !data.token;
+    await refresh();
+    toast('Token generated — copy it now');
+  } catch (err) { toast(err.message, true); }
+});
+
+$('btn-health-revoke').addEventListener('click', async () => {
+  if (!confirm('Revoke the Apple Health token? Existing Shortcuts will stop working.')) return;
+  try {
+    await api('health/token', { method: 'DELETE' });
+    $('health-token').value = '';
+    $('health-token-reveal').hidden = true;
+    await refresh();
+    renderHealthToken();
+    toast('Apple Health token revoked');
+  } catch (err) { toast(err.message, true); }
+});
+
+$('btn-copy-health-token').addEventListener('click', async () => {
+  const value = $('health-token').value;
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    toast('Token copied');
+  } catch (_) {
+    $('health-token').select();
+    try { document.execCommand('copy'); toast('Token copied'); }
+    catch (err) { toast('Select and copy the token manually', true); }
+  }
+});
 
 // Provider presets. `base` is a UI convenience only: blank means "let the
 // server use its env/default" (relevant for Qwen Token Plan hosts).

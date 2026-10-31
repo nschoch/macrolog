@@ -198,6 +198,28 @@ try:
     check("B's save leaves A's provider and key intact",
           len(provA2) == 1 and provA2[0].get("kind") == "openrouter"
           and provA2[0].get("has_key") is True, bdA2[:140])
+
+    # 11. Apple Health tokens authenticate without a browser session, but only
+    # for their own owner's data.
+    stTA,_,bdTA = req("/api/health/token", method="POST",
+                      headers={"Cookie":"macrolog_session="+ck_a})
+    tokenA = (json.loads(bdTA) or {}).get("token") or ""
+    stTB,_,bdTB = req("/api/health/token", method="POST",
+                      headers={"Cookie":"macrolog_session="+ck_b})
+    tokenB = (json.loads(bdTB) or {}).get("token") or ""
+    check("A and B can mint separate health tokens",
+          bool(tokenA) and bool(tokenB) and tokenA != tokenB, f"{len(tokenA)}/{len(tokenB)}")
+    stHA,_,bdHA = req("/health/day", headers={"Authorization":"Bearer "+tokenA})
+    stHB,_,bdHB = req("/health/day", headers={"Authorization":"Bearer "+tokenB})
+    check("health token works without a session",
+          stHA == 200 and stHB == 200, f"{stHA}/{stHB}")
+    check("health token is scoped to its owner's meals",
+          "A-only dish" in bdHA and "A-only dish" not in bdHB,
+          f"A={bdHA[:80]} B={bdHB[:80]}")
+    req("/api/health/token", method="DELETE",
+        headers={"Cookie":"macrolog_session="+ck_a})
+    req("/api/health/token", method="DELETE",
+        headers={"Cookie":"macrolog_session="+ck_b})
     # A can revoke sharing without deleting the provider.
     stA3,_,bdA3 = req("/api/settings", method="PUT",
                       headers={"Cookie":"macrolog_session="+ck_a},

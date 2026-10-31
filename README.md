@@ -196,6 +196,13 @@ Prefer no proxy? The server can also terminate TLS itself:
 
 Everything is editable after the fact, and every edit feeds loop #2.
 
+### Apple Health
+
+Direct HealthKit access is impossible from a PWA. For an iOS Shortcut that
+writes daily food totals, weight, and exercise into Apple Health, use the
+read-only token endpoint described in [docs/APPLE_HEALTH.md](docs/APPLE_HEALTH.md).
+Generate the token in **Settings → Apple Health**.
+
 ## Layout
 
 ```
@@ -221,7 +228,7 @@ excluded from JSON exports. Nothing else leaves your network.
 
 Working and tested end-to-end (API suite green, UI verified on a 420px mobile
 viewport). Not yet a polished native app — PRs welcome, especially for barcode
-scanning and Health Connect / Apple Health export.
+scanning and native Health Connect integration.
 
 ## License
 

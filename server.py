@@ -8,10 +8,13 @@ any machine with Python 3.9+: Mac, Linux, Proxmox LXC, Docker, a Pi.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import socket
 import sys
@@ -59,6 +62,8 @@ DEFAULT_SETTINGS = {
     "calorie_target": None,
     "calorie_target_locked": False,  # true freezes the target against adaptation
     "target_adjusted_on": None,      # YYYY-MM-DD of the last adaptive move
+    "health_token_hash": None,       # SHA-256 only; the token is shown once
+    "health_token_created_at": None,
     "start_date": None,
     "starting_weight_kg": None,
     "auto_adapt": True,
@@ -151,7 +156,8 @@ def load_env():
 USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
                      "calorie_target", "calorie_target_locked",
-                     "target_adjusted_on", "start_date", "starting_weight_kg",
+                     "target_adjusted_on", "health_token_hash",
+                     "health_token_created_at", "start_date", "starting_weight_kg",
                      "auto_adapt", "calibrate_estimates", "_profile_set",
                      "meal_gap_minutes", "time_format", "providers"}
 
@@ -210,6 +216,26 @@ def _shared_providers_for(owner: str) -> list[dict]:
             entry["_shared_owner"] = subject
             out.append(entry)
     return out
+
+
+def _hash_health_token(token: str) -> str:
+    return hashlib.sha256(str(token).encode()).hexdigest()
+
+
+def _owner_for_health_token(token: str) -> str | None:
+    """Resolve a Shortcut token to its owner. Tokens are stored hashed only."""
+    if not token:
+        return None
+    digest = _hash_health_token(token)
+    for row in db.query("SELECT key, value FROM settings WHERE key LIKE 'settings:%'"):
+        try:
+            blob = json.loads(row["value"])
+        except Exception:
+            continue
+        stored = blob.get("health_token_hash") if isinstance(blob, dict) else None
+        if stored and hmac.compare_digest(str(stored), digest):
+            return str(row["key"])[len("settings:"):] or "default"
+    return None
 
 
 def get_settings(owner: str = "default") -> dict:
@@ -853,6 +879,24 @@ class Api:
             s.get("calorie_target") or tdee_from_formula(s) or 2200, s)}
 
     @staticmethod
+    def POST_health_token(h, q, body):
+        """Create a fresh read-only Shortcut token, shown once."""
+        owner = getattr(h, "owner", "default")
+        token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        save_user_settings(owner, {"health_token_hash": _hash_health_token(token),
+                                   "health_token_created_at": now})
+        return 200, {"token": token, "created_at": now,
+                     "endpoint": "/health/day"}
+
+    @staticmethod
+    def DELETE_health_token(h, q, body):
+        owner = getattr(h, "owner", "default")
+        save_user_settings(owner, {"health_token_hash": None,
+                                   "health_token_created_at": None})
+        return 200, {"revoked": True}
+
+    @staticmethod
     def POST_provider_models(h, q, body):
         """List models for a provider using a draft or already-saved key.
 
@@ -1209,6 +1253,7 @@ def _public_settings(s: dict) -> dict:
     # A legacy top-level key (from before providers owned their own keys) must
     # not leak either. Provider keys are stripped below.
     out.pop("api_key", None)
+    out["health_token_set"] = bool(out.pop("health_token_hash", None))
     # api_key is deliberately NOT included: secrets stay on the server and are
     # write-only from the browser's perspective. `has_key` distinguishes a saved
     # key from one inherited via the server's environment (`key_source: env`).
@@ -1357,6 +1402,46 @@ def _day_summary(d: str, owner: str = "default") -> dict:
         for k in ("calories", "protein", "carbs", "fat")},
         "meals": [_meal_dict(m, item_map.get(m["id"], [])) for m in meals],
         "exercise": _exercise_total(d, owner)}
+
+
+def _health_day_payload(d: str, owner: str) -> dict:
+    """Read-only day payload for the Apple Health Shortcut.
+
+    Daily totals are the simple path; `meals` is included for people who want
+    per-meal Health samples, and weight/exercise are optional extras.
+    """
+    meals = db.meals_for_date(d, owner)
+    item_map = db.items_for_date(d, owner)
+    totals = {k: round(sum(float(m[k]) for m in meals), 1)
+              for k in ("calories", "protein", "carbs", "fat", "fiber")}
+    rows = []
+    for m in meals:
+        rows.append({
+            "time": datetime.fromtimestamp(m["ts"], APP_TZ).strftime("%H:%M"),
+            "timestamp": m["ts"],
+            "kind": m["kind"],
+            "description": m["description"],
+            "calories": m["calories"], "protein": m["protein"],
+            "carbs": m["carbs"], "fat": m["fat"], "fiber": m["fiber"],
+            "items": item_map.get(m["id"], []),
+        })
+    w = db.one("SELECT date, value FROM weights WHERE owner=? AND date=?",
+               (owner, d))
+    sample_at = datetime.fromisoformat(d + "T12:00:00")
+    if APP_TZ is not None:
+        sample_at = sample_at.replace(tzinfo=APP_TZ)
+    return {
+        "date": d,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "totals": totals,
+        "meals": rows,
+        "weight": ({"date": w["date"], "kg": round(float(w["value"]), 2)}
+                   if w else None),
+        "exercise_calories": _exercise_total(d, owner),
+        "sample_at": sample_at.isoformat(),
+        "units": {"calories": "kcal", "protein": "g", "carbs": "g",
+                  "fat": "g", "fiber": "g", "weight": "kg"},
+    }
 
 
 # Clock windows used to NAME an auto-detected sitting. A meal's start time picks
@@ -1716,6 +1801,8 @@ class Handler(BaseHTTPRequestHandler):
         self._begin()
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path in ("/health/day", "/health/today"):
+            return self._health_day(q)
         if u.path.startswith("/auth/"):
             return self._auth(u.path, q)
         if u.path.startswith("/api/"):
@@ -1797,6 +1884,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self._json(404, {"error": "unknown auth route"})
 
+    def _health_day(self, q):
+        auth = self.headers.get("Authorization", "")
+        token = auth.split(None, 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+        owner = _owner_for_health_token(token)
+        if not owner:
+            return self._json(401, {"error": "invalid health token"})
+        d = (q.get("date") or [today_str()])[0]
+        try:
+            d = date.fromisoformat(str(d)[:10]).isoformat()
+        except ValueError:
+            return self._json(400, {"error": "invalid date (use YYYY-MM-DD)"})
+        return self._json(200, _health_day_payload(d, owner))
+
     def _route(self, verb, path, q, body):
         parts = [p for p in path.strip("/").split("/") if p]
         # Enforce auth on all API endpoints (except none today) when enabled.
@@ -1845,6 +1945,10 @@ class Handler(BaseHTTPRequestHandler):
                 st, pl = Api.GET_history(self, q, body)
             elif resource == "adapt" and verb == "POST":
                 st, pl = Api.POST_adapt(self, q, body)
+            elif resource == "health" and tail == "token" and verb == "POST":
+                st, pl = Api.POST_health_token(self, q, body)
+            elif resource == "health" and tail == "token" and verb == "DELETE":
+                st, pl = Api.DELETE_health_token(self, q, body)
             elif resource == "settings" and verb == "GET":
                 st, pl = Api.GET_settings(self, q, body)
             elif resource == "settings" and verb == "PUT":

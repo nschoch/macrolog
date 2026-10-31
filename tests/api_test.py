@@ -686,7 +686,36 @@ st, sd = req("/api/state")
 check("crosscheck field is absent without JEV_API_KEY",
       "crosscheck" not in sd, str(sorted(sd.keys()))[:120])
 
-# 33. Model discovery: OpenRouter gets filtered to image-capable, non-batch
+# 33. Apple Health Shortcut token: read-only, hashed, revocable.
+st, ht = req("/api/health/token", "POST", {})
+ht_token = ht.get("token") or ""
+check("health token generated", st == 200 and len(ht_token) >= 32, str(ht)[:80])
+st, hs = req("/api/settings")
+check("settings reports a configured health token",
+      (hs.get("settings") or {}).get("health_token_set") is True,
+      str((hs.get("settings") or {}).get("health_token_set")))
+st, xp_health = req("/api/export")
+check("health token/hash never appears in settings or export",
+      ht_token not in json.dumps(hs) and "health_token_hash" not in json.dumps(xp_health))
+st, no_auth = req("/health/day")
+check("health endpoint requires a bearer token", st == 401, str(no_auth)[:100])
+health_date = time.strftime("%Y-%m-%d")
+st, hd = req("/health/day?date=" + health_date,
+             headers={"Authorization": "Bearer " + ht_token})
+check("health day returns totals and meals",
+      st == 200 and hd.get("date") == health_date
+      and isinstance(hd.get("totals"), dict)
+      and isinstance(hd.get("meals"), list),
+      str(hd)[:180])
+check("health day exposes gram units for Health samples",
+      (hd.get("units") or {}).get("protein") == "g"
+      and (hd.get("units") or {}).get("calories") == "kcal", str(hd.get("units")))
+st, _ = req("/api/health/token", "DELETE")
+st, old_token = req("/health/day?date=" + health_date,
+                    headers={"Authorization": "Bearer " + ht_token})
+check("revoking the health token invalidates it", st == 401, str(old_token)[:100])
+
+# 34. Model discovery: OpenRouter gets filtered to image-capable, non-batch
 #     models; a generic OpenAI-compatible endpoint returns everything. The mock
 #     server keeps this deterministic and offline.
 MODEL_FIXTURE = {"data": [

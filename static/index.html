@@ -170,6 +170,44 @@
       <a class="ghost btn-link" href="/api/export"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"></use></svg>Download JSON backup</a>
       <p class="hint" id="app-build-line" hidden></p>
     </div>
+
+    <div class="card">
+      <h3>Apple Health</h3>
+      <p class="hint">Read-only endpoint for an iOS Shortcut. The token can read
+        this account's meals, weight, and exercise; it cannot change anything.</p>
+      <p class="hint" id="health-token-state">No token yet.</p>
+      <div class="sheet-btns prov-btns">
+        <button class="ghost tiny" id="btn-health-token"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Generate token</button>
+        <button class="ghost tiny" id="btn-health-revoke" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-trash"></use></svg>Revoke token</button>
+      </div>
+      <div id="health-token-reveal" hidden>
+        <label class="fld">Token (shown once)
+          <div class="inline-input">
+            <input id="health-token" type="text" readonly autocomplete="off" spellcheck="false">
+            <button class="ghost tiny" id="btn-copy-health-token">Copy</button>
+          </div>
+        </label>
+        <p class="hint">Endpoint: <code id="health-endpoint">/health/day</code><br>
+          Header: <code>Authorization: Bearer &lt;token&gt;</code></p>
+      </div>
+      <details class="totals-toggle">
+        <summary>Shortcut recipe</summary>
+        <ol class="health-steps">
+          <li>Shortcuts → <b>+</b> → <b>Get Contents of URL</b>.
+            URL: <code class="health-endpoint-copy">/health/day</code>;
+            method <b>GET</b>; header <code>Authorization</code> =
+            <code>Bearer &lt;token&gt;</code>.</li>
+          <li><b>Get Dictionary Value</b> for <code>totals.calories</code>,
+            <code>totals.protein</code>, <code>totals.carbs</code>,
+            <code>totals.fat</code>, <code>totals.fiber</code>.</li>
+          <li><b>Log Health Sample</b> for Dietary Energy (kcal), Protein (g),
+            Carbohydrates (g), Total Fat (g), and Fiber (g).</li>
+          <li>Optional: <code>weight.kg</code> → Body Mass; exercise is at
+            <code>exercise_calories</code>. Run manually or from a daily
+            automation.</li>
+        </ol>
+      </details>
+    </div>
     <div class="save-bar"><button id="btn-save" class="primary"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg>Save settings</button></div>
   </section>
 </main>
