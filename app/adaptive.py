@@ -15,16 +15,20 @@ Two feedback loops, both borrowed in spirit from MacroFactor:
 """
 from __future__ import annotations
 
+import statistics
 from datetime import date, timedelta
 
 # ---------------------------------------------------------------- constants
 KCAL_PER_KG = 7700.0
 MIN_TARGET_ADJUST = 50.0     # never move the target by a trivially small amount
-MAX_WEEKLY_CUT = 1500.0      # safety clamp on how aggressive a cut can get
-MAX_WEEKLY_GAIN = 1000.0     # safety clamp on a bulk
+MAX_TARGET_STEP = 150.0      # max change per weekly review
 SMOOTHING = 0.6              # fraction of the computed correction to apply
 TREND_WINDOW_DAYS = 21       # regression window for the weight slope
-MIN_TREND_POINTS = 4         # enough data before we trust the slope
+MIN_TREND_POINTS = 8         # enough weigh-ins before we trust the slope
+MIN_TREND_DAYS = 14          # at least two weeks of trend data
+MIN_LOGGED_DAYS = 10         # intake coverage before trusting maintenance
+MIN_INTAKE_COVERAGE = 0.70    # at least 70% of days in the window
+MIN_INTAKE_BMR_FRACTION = 0.80  # below this, intake logging is likely incomplete
 
 FOOD_GROUPS = [
     ("alcohol", ("beer", "wine", "liquor", "cocktail", "vodka", "whiskey",
@@ -83,11 +87,24 @@ def linear_slope(points):
     return sxy / sxx
 
 
-def weight_trend(rows) -> dict:
-    """Regression over recent weights. rows = iterable of (date_str, kg) or Rows.
+def theil_sen_slope(points):
+    """Median of pairwise slopes: robust to one bad weigh-in."""
+    pts = [(x, y) for x, y in points if x is not None and y is not None]
+    slopes = []
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            dx = pts[j][0] - pts[i][0]
+            if dx:
+                slopes.append((pts[j][1] - pts[i][1]) / dx)
+    return statistics.median(slopes) if slopes else None
 
-    Uses only the trailing TREND_WINDOW_DAYS but requires MIN_TREND_POINTS
-    samples before reporting reliable=True.
+
+def weight_trend(rows) -> dict:
+    """Robust trend over recent weights. rows = (date_str, kg) or DB Rows.
+
+    Theil-Sen rather than least squares, so a single water-weight spike cannot
+    dominate the slope. Reliability now requires two weeks and eight weigh-ins;
+    the old 4-point/7-day gate trusted very thin data.
     """
     parsed = []
     for r in rows:
@@ -102,6 +119,7 @@ def weight_trend(rows) -> dict:
     if not parsed:
         return {"slope_kg_per_week": None, "current_kg": None, "points": 0,
                 "days_covered": 0, "reliable": False}
+    parsed.sort(key=lambda x: x[0])
 
     latest_day = max(d for d, _ in parsed)
     cutoff = latest_day - timedelta(days=TREND_WINDOW_DAYS)
@@ -111,19 +129,17 @@ def weight_trend(rows) -> dict:
 
     base = min(d for d, _ in window)
     pts = [((d - base).days, v) for d, v in window]
-    slope_per_day = linear_slope(pts)
+    slope_per_day = theil_sen_slope(pts)
 
-    # Smoothed current weight: fitted value at the newest day, not the raw
-    # last weigh-in, then blended toward it so the number stays believable.
     if slope_per_day is not None:
-        n = float(len(pts))
-        mx = sum(x for x, _ in pts) / n
-        my = sum(y for _, y in pts) / n
-        intercept = my - slope_per_day * mx
+        intercept = statistics.median(v - slope_per_day * x for x, v in pts)
         smoothed = intercept + slope_per_day * pts[-1][0]
+        # Blend with the median of the last three readings, not just the raw
+        # latest one, so a one-day spike does not become "current weight".
+        recent = statistics.median(v for _, v in window[-3:])
+        smoothed = 0.75 * smoothed + 0.25 * recent
     else:
-        smoothed = pts[-1][1]
-    smoothed = 0.75 * smoothed + 0.25 * pts[-1][1]
+        smoothed = statistics.median(v for _, v in window[-3:])
 
     days = (max(d for d, _ in window) - min(d for d, _ in window)).days
     return {
@@ -131,21 +147,26 @@ def weight_trend(rows) -> dict:
         "current_kg": round(smoothed, 2),
         "points": len(window),
         "days_covered": days,
-        "reliable": len(window) >= MIN_TREND_POINTS and days >= 7,
+        "reliable": len(window) >= MIN_TREND_POINTS and days >= MIN_TREND_DAYS,
     }
 
 
 # ------------------------------------------------------------- energy needs
-def tdee_from_formula(settings: dict, weight_kg=None):
-    """Mifflin-St Jeor baseline, used only to seed the first target."""
+def bmr_from_formula(settings: dict, weight_kg=None):
+    """Mifflin-St Jeor BMR. This is the safety floor for a calorie target."""
     sex = settings.get("sex", "male")
     age = float(settings.get("age") or 30)
     height_cm = float(settings.get("height_cm") or 175)
-    activity = float(settings.get("activity_factor") or 1.35)
     w = weight_kg or float(settings.get("starting_weight_kg") or 80)
     base = 10.0 * w + 6.25 * height_cm - 5.0 * age
     base += 5 if sex == "male" else -161
-    return round(base * activity)
+    return round(base)
+
+
+def tdee_from_formula(settings: dict, weight_kg=None):
+    """Mifflin-St Jeor baseline, used only to seed the first target."""
+    activity = float(settings.get("activity_factor") or 1.35)
+    return round(bmr_from_formula(settings, weight_kg) * activity)
 
 
 def macronutrient_targets(calorie_target: float, settings: dict) -> dict:
@@ -174,26 +195,43 @@ def macronutrient_targets(calorie_target: float, settings: dict) -> dict:
             "carbs": carbs_g, "fat": fat_g, "fiber": fiber_g}
 
 
-def adapt_targets(db, settings: dict, today=None, owner: str = "default") -> dict:
+def adapt_targets(db, settings: dict, today=None, owner: str = "default",
+                  force: bool = False) -> dict:
     """Core loop: reconcile logged intake against observed weight change.
 
-    Reads the rolling weight trend plus recent average logged intake, then
-    moves the calorie target so predicted and observed rates converge. The
-    caller persists settings["calorie_target"] when adjusted is True.
+    Safety rules (in order):
+      1. a locked target is never changed;
+      2. no adaptation before 14 days / 8 weigh-ins / 10 logged days;
+      3. hold when intake logging looks incomplete;
+      4. monthly? no -> weekly cadence, 60% smoothing, max 150 kcal per move;
+      5. never propose below BMR (Mifflin-St Jeor).
     """
     today = today or date.today()
-    start_date = settings.get("start_date")
-    if start_date:
-        try:
-            if (today - date.fromisoformat(start_date)).days < 3:
-                return {"reason": "too early", "adjusted": False, "trend": {}}
-        except ValueError:
-            pass
-
     rows = db.query(
         "SELECT date, value FROM weights WHERE date <= ? AND owner=? ORDER BY date",
         (today.isoformat(), owner))
     trend = weight_trend(rows)
+    weekly_rate = float(settings.get("weekly_rate_kg") or 0.0)
+    seed = tdee_from_formula(settings, trend["current_kg"])
+    bmr = bmr_from_formula(settings, trend["current_kg"])
+    formula_target = round(seed + weekly_rate * KCAL_PER_KG / 7.0)
+    result = {"trend": trend, "adjusted": False, "seed": seed, "bmr": bmr,
+              "target": formula_target}
+
+    if settings.get("calorie_target_locked"):
+        result.update(reason="target locked", target=settings.get("calorie_target"))
+        return result
+
+    start_date = settings.get("start_date")
+    elapsed = None
+    if start_date:
+        try:
+            elapsed = (today - date.fromisoformat(str(start_date)[:10])).days
+        except ValueError:
+            elapsed = None
+    if elapsed is not None and elapsed < MIN_TREND_DAYS:
+        result["reason"] = f"need {MIN_TREND_DAYS} days of data (have {max(0, elapsed)})"
+        return result
 
     # Average logged intake over the same window the weight slope uses, so the
     # two numbers describe the identical period. COUNT(DISTINCT date) guards
@@ -205,67 +243,92 @@ def adapt_targets(db, settings: dict, today=None, owner: str = "default") -> dic
         ((today - timedelta(days=TREND_WINDOW_DAYS)).isoformat(), today.isoformat(), owner))
     logged_avg = avg["a"] if avg else None
     logged_days = int(avg["d"]) if avg else 0
+    result.update(logged_avg=round(logged_avg) if logged_avg else None,
+                  logged_days=logged_days)
 
-    result = {"trend": trend, "logged_avg": round(logged_avg) if logged_avg else None,
-              "logged_days": logged_days, "adjusted": False}
-
-    weekly_rate = float(settings.get("weekly_rate_kg") or 0.0)
-    seed = tdee_from_formula(settings, trend["current_kg"])
-
-    if not trend["reliable"] or not logged_avg or logged_days < MIN_TREND_POINTS:
-        result["reason"] = "insufficient data"
-        if seed:
-            result["target"] = round(seed + weekly_rate * KCAL_PER_KG / 7.0)
+    if not trend["reliable"]:
+        result["reason"] = (f"need {MIN_TREND_POINTS} weigh-ins over "
+                            f"{MIN_TREND_DAYS} days")
+        return result
+    if not logged_avg or logged_days < MIN_LOGGED_DAYS:
+        result["reason"] = f"need {MIN_LOGGED_DAYS} logged-intake days (have {logged_days})"
         return result
 
-    # Solve for TRUE maintenance directly instead of nudging the last target.
-    #   observed_daily_change = (intake - maintenance) / KCAL_PER_KG * ... 
-    # Rearranged: maintenance = intake - daily_observed_energy_imbalance.
-    # This is a fixed point: re-running it on unchanged data returns the same
-    # answer, so repeated calls cannot compound into a runaway target.
+    span = max(MIN_TREND_DAYS, min(TREND_WINDOW_DAYS,
+                                  elapsed if elapsed is not None
+                                  else max(MIN_TREND_DAYS, trend["days_covered"])))
+    coverage = logged_days / float(span)
+    result["intake_coverage"] = round(coverage, 2)
+    if coverage < MIN_INTAKE_COVERAGE:
+        result["reason"] = f"intake logged on {logged_days} of {span} days"
+        return result
+    if logged_avg < bmr * MIN_INTAKE_BMR_FRACTION:
+        result["reason"] = (f"logged intake looks incomplete "
+                            f"({round(logged_avg)} kcal/day); holding")
+        return result
+
+    if not force and settings.get("target_adjusted_on"):
+        try:
+            since = (today - date.fromisoformat(
+                str(settings["target_adjusted_on"])[:10])).days
+        except ValueError:
+            since = None
+        if since is not None and since < 7:
+            result.update(reason=f"next review in {7 - since} days",
+                          target=settings.get("calorie_target"))
+            return result
+
     observed_kcal_per_day = trend["slope_kg_per_week"] * KCAL_PER_KG / 7.0
     maintenance_est = logged_avg - observed_kcal_per_day
+    if maintenance_est < bmr * 0.85:
+        result.update(reason="trend and intake disagree; holding target",
+                      maintenance=round(maintenance_est),
+                      target=settings.get("calorie_target"))
+        return result
 
     # Blend with the formula estimate; the more real data we have, the more we
     # trust observation over the population-average equation.
     data_weight = min(0.85, logged_days / 21.0)
     baseline = seed or maintenance_est
     true_maintenance = (data_weight * maintenance_est + (1 - data_weight) * baseline)
-
     proposed = true_maintenance + weekly_rate * KCAL_PER_KG / 7.0
 
-    # Guard against absurd results from messy input data.
-    floor = (seed or 1600) * 0.55
+    # The safety floor is BMR, not a fraction of TDEE. A target below BMR is
+    # what made a single heavy weigh-in look like "near starvation".
+    floor = max(1200.0, float(bmr))
     ceiling = (seed or 2600) * 1.55
-    hard_floor = max(1200.0, floor)
-    if not (hard_floor <= proposed <= ceiling):
-        result.update(reason="clamped to safe range",
-                      target=round(min(max(proposed, hard_floor), ceiling)),
-                      delta=0)
-        settings["calorie_target"] = round(min(max(proposed, hard_floor), ceiling))
-        return result
+    clamped = min(max(proposed, floor), ceiling)
+    result.update(maintenance=round(true_maintenance), proposed=round(proposed),
+                  floor=round(floor), ceiling=round(ceiling))
 
     current = settings.get("calorie_target")
     if current is None:
-        # First run: adopt the computed value outright rather than comparing
-        # against nothing (which would strand the target as unset).
-        settings["calorie_target"] = round(proposed)
-        result.update(adjusted=True, target=round(proposed), delta=0,
-                      maintenance=round(true_maintenance),
+        settings["calorie_target"] = round(clamped)
+        settings["target_adjusted_on"] = today.isoformat()
+        result.update(adjusted=True, target=round(clamped), delta=0,
                       reason=f"initial estimate from {logged_days} logged days")
         return result
 
     current = float(current)
-    if abs(proposed - current) < max(MIN_TARGET_ADJUST, abs(current) * 0.03):
+    if abs(clamped - current) < max(MIN_TARGET_ADJUST, abs(current) * 0.03):
         result.update(reason="within deadband", target=round(current), delta=0)
         return result
 
-    settings["calorie_target"] = round(proposed)
-    result.update(adjusted=True, target=round(proposed),
-                  delta=round(proposed - current),
-                  maintenance=round(true_maintenance),
-                  reason=f"observed {trend['slope_kg_per_week']:+.2f} kg/wk on "
-                         f"{round(logged_avg)} kcal/day intake vs goal {weekly_rate:+.2f} kg/wk")
+    desired = current + SMOOTHING * (clamped - current)
+    step = max(-MAX_TARGET_STEP, min(MAX_TARGET_STEP, desired - current))
+    new_target = round(current + step)
+    if abs(new_target - current) < MIN_TARGET_ADJUST:
+        result.update(reason="within deadband", target=round(current), delta=0)
+        return result
+
+    settings["calorie_target"] = new_target
+    settings["target_adjusted_on"] = today.isoformat()
+    reason = (f"observed {trend['slope_kg_per_week']:+.2f} kg/wk on "
+              f"{round(logged_avg)} kcal/day vs goal {weekly_rate:+.2f} kg/wk")
+    if abs(step) >= MAX_TARGET_STEP:
+        reason += f"; capped at {int(MAX_TARGET_STEP)} kcal"
+    result.update(adjusted=True, target=new_target,
+                  delta=round(new_target - current), reason=reason)
     return result
 
 

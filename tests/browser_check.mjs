@@ -201,6 +201,8 @@ try {
 
   const btnState = () => evalJson(`(({label: document.getElementById('btn-unlock').textContent.trim(),
       targetVal: document.getElementById('s-target').value,
+      autoDisabled: document.getElementById('s-autoadapt').disabled,
+      lockHintHidden: document.getElementById('s-lock-hint').hidden,
       viewActive: document.getElementById('view-settings').classList.contains('active')}))`);
 
   let s0 = await btnState();
@@ -255,6 +257,8 @@ try {
   check('click #1 produced no JS error', jsErrors.length === errsBefore, jsErrors.slice(errsBefore).join(' | ').slice(0, 300));
   let s1 = await btnState();
   check('after click #1 button shows "locked"', s1.label === 'locked', `label=${s1.label} targetVal=${s1.targetVal}`);
+  check('locked pauses the auto-adapt checkbox and explains why',
+        s1.autoDisabled === true && s1.lockHintHidden === false, JSON.stringify(s1));
 
   // Verify server-side (in-page fetch so the session cookie rides along).
   const serverTarget = () => evalJson(`fetch('/api/state').then(r=>r.json()).then(d=>({v: d.settings.calorie_target ?? null}))`).then(o => o.v);
@@ -268,6 +272,8 @@ try {
   check('click #2 produced no JS error', jsErrors.length === errsBefore2, jsErrors.slice(errsBefore2).join(' | ').slice(0, 300));
   let s2 = await btnState();
   check('after click #2 button shows "auto"', s2.label === 'auto', `label=${s2.label}`);
+  check('unlocking re-enables auto-adapt and hides the lock hint',
+        s2.autoDisabled === false && s2.lockHintHidden === true, JSON.stringify(s2));
 
   const st2 = await serverTarget().catch(() => 'ERR');
   check('server calorie_target cleared after unlock', st2 == null, `calorie_target=${st2}`);

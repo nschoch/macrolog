@@ -57,6 +57,8 @@ DEFAULT_SETTINGS = {
     "protein_g_per_kg": 1.8,
     "fat_calorie_pct": 0.25,
     "calorie_target": None,
+    "calorie_target_locked": False,  # true freezes the target against adaptation
+    "target_adjusted_on": None,      # YYYY-MM-DD of the last adaptive move
     "start_date": None,
     "starting_weight_kg": None,
     "auto_adapt": True,
@@ -148,7 +150,8 @@ def load_env():
 # Settings keys that are per-person vs shared across all users.
 USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "weekly_rate_kg", "protein_g_per_kg", "fat_calorie_pct",
-                     "calorie_target", "start_date", "starting_weight_kg",
+                     "calorie_target", "calorie_target_locked",
+                     "target_adjusted_on", "start_date", "starting_weight_kg",
                      "auto_adapt", "calibrate_estimates", "_profile_set",
                      "meal_gap_minutes", "time_format", "providers"}
 
@@ -832,6 +835,13 @@ class Api:
         if "providers" in body:
             personal["providers"] = _clean_providers(
                 body.get("providers"), current.get("providers") or [])
+        if personal.get("calorie_target_locked") is True:
+            # A lock is a freeze: auto-adapt must not remain enabled in the UI.
+            personal["auto_adapt"] = False
+            if "calorie_target" not in personal:
+                rate = float(current.get("weekly_rate_kg") or 0.0)
+                personal["calorie_target"] = round(
+                    tdee_from_formula(current) + rate * 7700.0 / 7.0)
         # Saving any body/goal field marks the profile as configured (clears nag).
         if personal.get("units") or personal.get("age") or personal.get("height_cm") \
                 or personal.get("sex") or personal.get("activity_factor"):
@@ -1533,9 +1543,13 @@ def _maybe_adapt(settings: dict, persist: bool = False, force: bool = False,
     if not (force or settings.get("auto_adapt", True)):
         return {"adapted": False, "reason": "auto-adapt disabled"}
     snapshot = json.loads(json.dumps(settings))
-    res = adapt_targets(db, settings, owner=owner)
+    res = adapt_targets(db, settings, today=date.fromisoformat(today_str()),
+                        owner=owner, force=force)
     if res.get("adjusted") and persist:
-        save_user_settings(owner, {"calorie_target": settings["calorie_target"]})
+        updates = {"calorie_target": settings["calorie_target"]}
+        if settings.get("target_adjusted_on"):
+            updates["target_adjusted_on"] = settings["target_adjusted_on"]
+        save_user_settings(owner, updates)
     res["adapted"] = bool(res.get("adjusted"))
     res["targets"] = macronutrient_targets(
         res.get("target") or snapshot.get("calorie_target") or 2200,

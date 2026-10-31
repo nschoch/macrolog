@@ -278,6 +278,11 @@ function renderStatus(s) {
   }
   if (s.needs_setup) bits.push(['warn', 'Tell us your height and goal in Settings to seed your calorie target.']);
   if (s.exercise) bits.push(['', `<b>+${fmt(s.exercise)}</b> kcal credited from activity today`]);
+  if (s.settings && s.settings.calorie_target_locked) {
+    bits.push(['', 'Target locked — automatic adjustments paused.']);
+  } else if (!tr.reliable && (s.weights_count || 0) >= 4) {
+    bits.push(['', 'Target holding — needs 14 days / 8 weigh-ins of trend data.']);
+  }
 
   $('status-strip').innerHTML = bits.map(([cls, html]) =>
     `<div class="pill ${cls}">${html}</div>`).join('');
@@ -1326,9 +1331,11 @@ function renderSettings() {
   $('s-protein').value = s.protein_g_per_kg ?? 1.8;
   $('s-fatpct').value = s.fat_calorie_pct ?? 0.25;
   $('s-target').value = s.calorie_target ?? '';
-  $('s-autoadapt').checked = s.auto_adapt !== false;
+  $('s-autoadapt').checked = s.auto_adapt !== false && !s.calorie_target_locked;
+  $('s-autoadapt').disabled = !!s.calorie_target_locked;
   $('s-calibrate').checked = s.calibrate_estimates !== false;
-  $('btn-unlock').textContent = s.calorie_target ? 'locked' : 'auto';
+  $('btn-unlock').textContent = s.calorie_target_locked ? 'locked' : 'auto';
+  $('s-lock-hint').hidden = !s.calorie_target_locked;
   syncWeightDock();
 
   const buildLine = $('app-build-line');
@@ -1766,14 +1773,27 @@ $('s-units').addEventListener('change', () => {
 // left for the adaptive engine to manage. One PUT, no round-trips.
 $('btn-unlock').addEventListener('click', async () => {
   const s = state.settings || {};
-  const currentlyLocked = !!s.calorie_target;
+  const locked = !!s.calorie_target_locked;
+  const fallback = (state.targets && state.targets.calories) || 2200;
   try {
-    await api('settings', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      // Unlock -> clear the pin (server recomputes); lock -> pin current value.
-      body: JSON.stringify({ calorie_target: currentlyLocked ? null : (s.calorie_target || 2200) }),
-    });
-    toast(currentlyLocked ? 'Target set to auto' : 'Target locked');
+    if (locked) {
+      // Unlock: clear the pin and let the weekly adaptive loop resume.
+      await api('settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calorie_target_locked: false, calorie_target: null,
+                               auto_adapt: true }),
+      });
+      toast('Target set to auto');
+    } else {
+      // Lock is a real freeze: keep the number and pause adaptation.
+      await api('settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calorie_target_locked: true,
+                               calorie_target: s.calorie_target || fallback,
+                               auto_adapt: false }),
+      });
+      toast('Target locked');
+    }
     await refresh();
     if ($('view-settings').classList.contains('active')) renderSettings();
   } catch (err) { toast(err.message, true); }

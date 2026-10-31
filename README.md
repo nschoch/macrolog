@@ -23,12 +23,15 @@ MacroLog does.
 
 The two feedback loops live in [`app/adaptive.py`](app/adaptive.py):
 
-1. **Weight → target.** A least-squares slope over ~3 weeks of weigh-ins
-   estimates your *real* rate of change, immune to daily water swings. The app
-   solves for your true maintenance directly (`maintenance = intake − observed
-   energy imbalance`) rather than nudging last week's number, so it's a fixed
-   point — repeated runs on unchanged data cannot drift or run away. When you're
-   losing slower than your goal implies, the target tightens; faster, it loosens.
+1. **Weight → target.** A robust (Theil-Sen) slope over up to 3 weeks of
+   weigh-ins estimates your *real* rate of change without letting one water-weight
+   spike dominate. The app solves for true maintenance directly
+   (`maintenance = intake − observed energy imbalance`) rather than nudging last
+   week's number, so repeated runs on unchanged data cannot drift or run away.
+   It waits for **14 days, 8 weigh-ins and 10 logged-intake days**, then adjusts
+   at most **once a week** and at most **150 kcal per move**; the target never
+   goes below BMR, and it holds if intake logging looks incomplete. **locked**
+   is a true freeze; **auto** resumes adaptation.
 
 2. **Estimate → correction.** Every time you edit a logged meal, the predicted-
    vs-actual pair is stored. Per-food-group multipliers learned from that
@@ -185,11 +188,11 @@ Prefer no proxy? The server can also terminate TLS itself:
 
 ## How a day goes
 
-1. Tap the green camera button → shoot your plate.
+1. Tap the green add button → shoot your plate (or describe it).
 2. The model returns items, grams, calories, macros, and a confidence score.
 3. Fix anything wrong (this trains the calibrator) → **Add to log**.
 4. Ring, macro bars, and remaining calories update instantly.
-5. Log your weight each morning. After ~a week the target starts adapting.
+5. Log your weight each morning. After 14 days / 8 weigh-ins the target starts adapting.
 
 Everything is editable after the fact, and every edit feeds loop #2.
 
