@@ -89,6 +89,8 @@ function clientTz() {
   catch (_) { return ''; }
 }
 
+let loginRedirectStarted = false;
+
 async function api(path, opts = {}) {
   // The server only accepts JSON bodies labelled as JSON (CSRF hardening).
   const json = typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {};
@@ -98,7 +100,12 @@ async function api(path, opts = {}) {
   try { data = await res.json(); } catch (_) { /* empty body */ }
   if (res.status === 401 && data.login) {
     // Session missing/expired: bounce to OIDC login, preserving current view.
-    window.location.assign(data.login + '?next=' + encodeURIComponent(location.pathname));
+    // Several API calls can 401 together on load; only start the login once,
+    // or each redirect appends another in-flight state to the login cookie.
+    if (!loginRedirectStarted) {
+      loginRedirectStarted = true;
+      window.location.assign(data.login + '?next=' + encodeURIComponent(location.pathname));
+    }
     throw new Error('signing in…');
   }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);

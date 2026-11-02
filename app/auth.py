@@ -146,9 +146,11 @@ def read_session_cookie(raw: str | None) -> dict | None:
 # re-delivers callbacks later than Android does, so users hit "invalid or
 # expired state". Now the whole handshake travels inside the `state` parameter
 # itself: sealed (AES-256-GCM when `cryptography` is present, else an HMAC-
-# SHA256 envelope) with a key derived from the client secret, so it is
-# tamper-evident — the provider echoes state back verbatim — and needs no
-# shared storage. Public clients (no secret) fall back to the in-memory map.
+# SHA256 envelope). Confidential clients key it with the client secret; public
+# clients key it with the persisted session key. Either way it is tamper-
+# evident — the provider echoes state back verbatim — and needs no shared
+# storage. The browser's state cookie may carry several in-flight states so
+# duplicate / concurrent /auth/login navigations cannot invalidate each other.
 # ---------------------------------------------------------------------------
 _STATE_BLOB_AAD = b"macrolog-oidc-state-v1"
 
@@ -159,20 +161,26 @@ except Exception:                       # LXC has it; dev boxes may not
 
 
 def _state_key() -> bytes:
-    """Deterministic key derived from the confidential client secret."""
-    secret = os.environ.get("OIDC_CLIENT_SECRET", "") or "macrolog-public-client"
-    return hashlib.sha256(("macrolog-state:" + secret).encode()).digest()
+    """Key for the sealed handshake state.
+
+    Confidential clients use the client secret. Public clients have no client
+    secret, so use the persisted session key — secret, stable across restarts,
+    and already required for sessions. Never a public constant.
+    """
+    secret = (os.environ.get("OIDC_CLIENT_SECRET") or "").strip()
+    if secret:
+        return hashlib.sha256(("macrolog-state:" + secret).encode()).digest()
+    return hmac.new(_session_key(), _STATE_BLOB_AAD + b":public",
+                    hashlib.sha256).digest()
 
 
-def seal_state(meta: dict) -> str | None:
+def seal_state(meta: dict) -> str:
     """Encode the handshake so it survives restarts and other workers.
 
     Returns a URL-safe, tamper-evident string that the provider echoes back in
-    `state`, or None for public-client mode (no secret) where we fall back to
-    the legacy in-memory map. Uses AES-256-GCM when `cryptography` is present,
-    otherwise an HMAC-SHA256 envelope — both keyed by the client secret, so a
-    forged state cannot validate. Integrity matters here, not confidentiality
-    (the verifier is worthless without this request's own code exchange).
+    `state`. Uses AES-256-GCM when `cryptography` is present, otherwise an
+    HMAC-SHA256 envelope. Integrity matters here, not confidentiality (the
+    verifier is worthless without this request's own code exchange).
     """
     payload = json.dumps({
         "v": meta["verifier"], "n": meta["nonce"],
@@ -237,18 +245,13 @@ def build_login_url(base_url: str, redirect_after: str = "/") -> tuple[str, dict
     url = doc["authorization_endpoint"] + sep + urllib.parse.urlencode(params)
     meta = {"verifier": code_verifier, "nonce": nonce, "state": state,
             "redirect_after": redirect_after, "created": time.time()}
-    public_client = not os.environ.get("OIDC_CLIENT_SECRET")
-    if public_client:
-        _PENDING[state] = meta           # nothing to key a sealed blob with
-    else:
-        # Stateless handshake: the provider echoes `state` back verbatim, so we
-        # carry the verifier+nonce inside it and store nothing — survives
-        # restarts and works across workers. Legacy map kept as fallback below.
-        sealed = seal_state(meta)
-        meta["state"] = sealed
-        url = url.replace(urllib.parse.quote_plus(state),
-                          urllib.parse.quote_plus(sealed))
-        _PENDING[sealed] = meta          # cheap belt-and-braces for old tabs
+    # Stateless handshake: the provider echoes `state` back verbatim, so we
+    # carry the verifier+nonce inside it and store nothing — survives restarts
+    # and works across workers.
+    sealed = seal_state(meta)
+    meta["state"] = sealed
+    url = url.replace(urllib.parse.quote_plus(state),
+                      urllib.parse.quote_plus(sealed))
     return url, meta
 
 
@@ -265,8 +268,15 @@ def allowed(email: str | None) -> bool:
     return bool(email) and email.lower() in ok
 
 
-def complete_login(base_url: str, query: dict, expected_state: str | None) -> dict:
-    """Exchange the authorization code for tokens, validate, return user dict."""
+def complete_login(base_url: str, query: dict, expected_states) -> dict:
+    """Exchange the authorization code for tokens, validate, return user dict.
+
+    `expected_states` is the list of in-flight states from the browser's
+    HttpOnly state cookie. The callback's state must be one of them: this is
+    the CSRF binding, and it also proves the callback belongs to a login this
+    browser started. A list (rather than a single value) keeps duplicate or
+    concurrent /auth/login navigations from invalidating each other.
+    """
     if "error" in query:
         raise AuthError(f"provider returned error: {query.get('error')} "
                         f"{query.get('error_description', '')}".strip())
@@ -281,10 +291,13 @@ def complete_login(base_url: str, query: dict, expected_state: str | None) -> di
         legacy = True
     if not meta:
         raise AuthError("invalid or expired state (possible CSRF); retry login")
-    # CSRF binding: the state echoed by the provider must match the one we
-    # stashed in the browser's HttpOnly cookie at /auth/login. For sealed blobs
-    # this also proves *we* minted it (AES-GCM tag over our AAD).
-    if expected_state and expected_state != state:
+    if isinstance(expected_states, str):
+        expected_states = [expected_states]
+    expected_states = [s for s in (expected_states or []) if s]
+    # The state is public (it rides in the URL); plain membership is enough.
+    # It must have been minted for *this* browser's cookie, which is the CSRF
+    # binding that stops a saved attacker callback URL from logging a victim in.
+    if state not in expected_states:
         raise AuthError("invalid or expired state (possible CSRF); retry login")
     if legacy and meta.get("state") and meta["state"] != state:
         raise AuthError("invalid or expired state (possible CSRF); retry login")

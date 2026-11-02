@@ -73,6 +73,11 @@ from app import jev as JEVC
 
 SESSION_COOKIE = "macrolog_session"
 STATE_COOKIE = "macrolog_oidc_state"
+# The PWA can fire /auth/login more than once before the first callback lands
+# (two 401s on load, a restored tab, two windows). One cookie value per login
+# meant the second overwrote the first and the first callback failed with
+# "possible CSRF". Keep a small set of in-flight states instead.
+STATE_COOKIE_MAX = 6
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("MACROLOG_DATA", os.path.join(ROOT, "data"))
@@ -2421,12 +2426,16 @@ class Handler(BaseHTTPRequestHandler):
             if not OIDC.enabled():
                 return self._redirect("/")
             nxt = _local_path((q.get("next") or ["/"])[0])
+            current = self._cookies().get(STATE_COOKIE, "")
+            states = [s for s in current.split("|") if s][-(STATE_COOKIE_MAX - 1):]
             url, meta = OIDC.build_login_url(base, redirect_after=nxt)
-            self._set_cookie(STATE_COOKIE, meta["state"], max_age=600)
+            states.append(meta["state"])
+            self._set_cookie(STATE_COOKIE, "|".join(states), max_age=600)
             return self._redirect(url)
         if path == "/auth/callback":
             flat = {k: v[0] for k, v in q.items()}
-            expected = self._cookies().get(STATE_COOKIE)
+            raw = self._cookies().get(STATE_COOKIE, "")
+            expected = [s for s in raw.split("|") if s]
             try:
                 user, after = OIDC.complete_login(base, flat, expected)
             except OIDC.AuthError as e:
@@ -2435,10 +2444,15 @@ class Handler(BaseHTTPRequestHandler):
                            user.get("name"), user.get("picture"))
             self._set_cookie(SESSION_COOKIE, OIDC.make_session_cookie(user),
                              max_age=7 * 86400)
-            self._set_cookie(STATE_COOKIE, "", max_age=0)   # clear state cookie
+            # Drop just the state this callback consumed; another in-flight
+            # login keeps its own state and can still finish.
+            remaining = [s for s in expected if s != flat.get("state")]
+            self._set_cookie(STATE_COOKIE, "|".join(remaining),
+                             max_age=600 if remaining else 0)
             return self._redirect(_local_path(after))
         if path == "/auth/logout":
             self._set_cookie(SESSION_COOKIE, "", max_age=0)
+            self._set_cookie(STATE_COOKIE, "", max_age=0)
             body = b'<html><body style="font-family:sans-serif;background:#0f1115;color:#e8eaf0;text-align:center;padding-top:20vh">Signed out.<p><a href="/auth/login" style="color:#4ade80">Log back in</a></p></body></html>'
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")

@@ -42,11 +42,11 @@ def check(name, ok, detail=""):
 def main():
     failures = 0
 
-    # 1) Login stores pending state in memory only.
+    # 1) The handshake is self-contained; nothing needs to be kept in memory.
     url, meta = auth.build_login_url("https://app.example", redirect_after="/")
     state = meta["state"]
-    stored = state in auth._PENDING
-    if not check("login records pending state", stored):
+    if not check("login state is self-contained (sealed)",
+                 state.startswith(("G", "H")) and auth.open_state(state) is not None):
         failures += 1
 
     # 2) Simulate ANY loss of that memory (restart, second worker, reload):
@@ -60,7 +60,7 @@ def main():
     # still present.
     query = {"code": "abc", "state": state}
     try:
-        auth.complete_login("https://app.example", query, expected_state=state)
+        auth.complete_login("https://app.example", query, expected_states=[state])
         reached_exchange = True
         err = ""
     except auth.AuthError as e:
@@ -71,16 +71,39 @@ def main():
                  err[:90]):
         failures += 1
 
+    # Concurrent logins leave several states in the browser cookie; any one of
+    # them must still validate.
+    _, meta2 = auth.build_login_url("https://app.example", redirect_after="/")
+    try:
+        auth.complete_login("https://app.example", query,
+                            expected_states=[meta2["state"], state])
+        multi_ok = True
+    except auth.AuthError as e:
+        multi_ok = "state" not in str(e).lower()
+    if not check("callback accepted when another login is in flight", multi_ok):
+        failures += 1
+
     # CSRF binding: provider echoing back a state that != our cookie must reject.
     auth._PENDING.clear()
     try:
         auth.complete_login("https://app.example",
                             {"code": "x", "state": state},
-                            expected_state="attacker-supplied")
+                            expected_states=["attacker-supplied"])
         csrf_ok = False
     except auth.AuthError as e:
         csrf_ok = "state" in str(e).lower()
     if not check("mismatched state cookie rejected (CSRF)", csrf_ok):
+        failures += 1
+
+    # Audit H3: a victim with no state cookie must not accept an attacker's
+    # saved callback URL (login CSRF).
+    try:
+        auth.complete_login("https://app.example", {"code": "x", "state": state},
+                            expected_states=[])
+        missing_ok = False
+    except auth.AuthError as e:
+        missing_ok = "state" in str(e).lower()
+    if not check("callback with no state cookie rejected", missing_ok):
         failures += 1
 
     # 3) The handshake blob must be tamper-evident: flipping any character has
@@ -91,7 +114,7 @@ def main():
     forged = state[:-4] + ("AAAA" if not state.endswith("AAAA") else "BBBB")
     try:
         auth.complete_login("https://app.example", {"code": "x", "state": forged},
-                            expected_state=forged)
+                            expected_states=[forged])
         tamper_ok = False
     except auth.AuthError as e:
         tamper_ok = "state" in str(e).lower()
@@ -134,7 +157,32 @@ def main():
         import shutil
         shutil.rmtree(d, ignore_errors=True)
 
-    total = 7
+    # 5) Public client (PKCE, no client secret): the sealed state must use the
+    #    persisted session key, not the old in-memory map or a public constant.
+    saved_client_secret = os.environ.pop("OIDC_CLIENT_SECRET", None)
+    saved_key = auth._SESSION_KEY
+    os.environ["MACROLOG_SESSION_SECRET"] = "p" * 40
+    auth.init_session_key()
+    try:
+        _, pmeta = auth.build_login_url("https://app.example", redirect_after="/")
+        pstate = pmeta["state"]
+        auth._PENDING.clear()
+        try:
+            auth.complete_login("https://app.example",
+                                {"code": "x", "state": pstate},
+                                expected_states=[pstate])
+            public_ok = True
+        except auth.AuthError as e:
+            public_ok = "state" not in str(e).lower()
+        if not check("public-client state survives lost memory", public_ok):
+            failures += 1
+    finally:
+        if saved_client_secret is not None:
+            os.environ["OIDC_CLIENT_SECRET"] = saved_client_secret
+        os.environ.pop("MACROLOG_SESSION_SECRET", None)
+        auth._SESSION_KEY = saved_key
+
+    total = 10
     print(f"\n{'PASS' if failures == 0 else 'FAIL'}: {total - failures}/{total} checks passed")
     if failures:
         print("=> OIDC login is fragile across restarts/workers; persist the "

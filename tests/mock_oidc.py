@@ -6,7 +6,7 @@ that mints an RS256 id_token signed by a throwaway key, and a JWKS endpoint.
 Run standalone on a port, or import start() from a test.
 """
 from __future__ import annotations
-import base64, hashlib, json, threading, time, urllib.parse, http.server, socketserver
+import base64, hashlib, json, secrets, threading, time, urllib.parse, http.server, socketserver
 
 def _b64u(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
@@ -78,7 +78,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path == "/jwks":
             return self._json(JWKS)
         if u.path == "/authorize":
-            code = "code-" + hashlib.sha1(str(time.time()).encode()).hexdigest()[:8]
+            code = "code-" + secrets.token_urlsafe(9)
             CODES[code] = {"redirect": q.get("redirect_uri"),
                            "nonce": q.get("nonce"), "state": q.get("state"),
                            "client_id": q.get("client_id")}

@@ -46,4 +46,6 @@ jobs:
           curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null || { cat /tmp/macrolog-server.log; exit 1; }
           python tests/api_test.py "http://127.0.0.1:$PORT" || { cat /tmp/macrolog-server.log; exit 1; }
       - name: Auth flow suite
-        run: python tests/auth_test.py
+        run: |
+          python tests/auth_test.py
+          python tests/auth_race_test.py
