@@ -1,8 +1,8 @@
 """End-to-end API tests against a running MacroLog server.
 
 Usage: python3 tests/api_test.py http://127.0.0.1:8790
-Exits non-zero on any failure. Uses a throwaway DB via MACROLOG_DATA in the
-caller's environment; deletes nothing you care about.
+Exits non-zero on any failure. Point it at a server started with a throwaway
+MACROLOG_DATA=$(mktemp -d); it refuses to run against a server that has data.
 """
 import json
 import os
@@ -12,6 +12,13 @@ import sys
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Pin this process to the server's fallback zone. The server resolves "today"
+# in MACROLOG_TZ (default America/Los_Angeles) for requests without
+# X-Client-TZ, while these checks used the runner's local date -- so on UTC CI
+# runners ~00:00-08:00 UTC the two disagreed and 7 checks failed daily.
+os.environ["TZ"] = os.environ.get("MACROLOG_TZ") or "America/Los_Angeles"
+time.tzset()
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8790"
 PASS, FAIL = [], []
@@ -50,6 +57,19 @@ def multipart(path, filename, filebytes):
     return req(path, "POST", raw_body=body,
                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
 
+
+# Safety: this suite rewrites the provider chain and logs meals, weights and
+# health tokens. Only ever run it against a THROWAWAY server, which starts
+# empty. Refuse a target that already holds data unless explicitly overridden.
+if os.environ.get("MACROLOG_TEST_ALLOW_DATA") != "1":
+    _st, _hist = req("/api/history?days=3660")
+    _st2, _set = req("/api/settings")
+    _has = (_hist.get("weights") or any((d.get("meals") or 0) for d in _hist.get("intake") or [])
+            or (_set.get("settings") or {}).get("providers"))
+    if _st != 200 or _has:
+        sys.exit(f"refusing to run: {BASE} is not an empty throwaway server "
+                 f"(status {_st}). Start one with MACROLOG_DATA=$(mktemp -d), or set "
+                 "MACROLOG_TEST_ALLOW_DATA=1 if you really mean it.")
 
 # Pin the server to the offline stub provider before anything else: a real
 # vision key in the server's .env must NOT make this suite hit live APIs

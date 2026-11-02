@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install optional test dependencies
-        run: python -m pip install --upgrade pip pillow
+        run: python -m pip install pillow==12.3.0 cryptography==50.0.2
       - name: Unit suites
         run: |
           python tests/foods_test.py
@@ -31,14 +31,18 @@ jobs:
       - name: API suite
         run: |
           export MACROLOG_DATA="$(mktemp -d)"
-          python server.py --port 8790 --no-browser > /tmp/macrolog-server.log 2>&1 &
+          # A free port, and proof that OUR server answered (not something else
+          # already listening on a fixed port).
+          PORT=$(python -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+          python server.py --port "$PORT" --no-browser > /tmp/macrolog-server.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           for i in $(seq 1 150); do
-            if curl -sf http://127.0.0.1:8790/ >/dev/null; then break; fi
+            kill -0 "$SERVER_PID" 2>/dev/null || { cat /tmp/macrolog-server.log; exit 1; }
+            if curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null; then break; fi
             sleep 0.2
           done
-          curl -sf http://127.0.0.1:8790/ >/dev/null || { cat /tmp/macrolog-server.log; exit 1; }
-          python tests/api_test.py http://127.0.0.1:8790
+          curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null || { cat /tmp/macrolog-server.log; exit 1; }
+          python tests/api_test.py "http://127.0.0.1:$PORT" || { cat /tmp/macrolog-server.log; exit 1; }
       - name: Auth flow suite
         run: python tests/auth_test.py

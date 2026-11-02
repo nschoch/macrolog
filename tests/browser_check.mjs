@@ -24,6 +24,22 @@ const TUNNEL = process.env.ML_TUNNEL_MAP || '';   // e.g. "host:443=127.0.0.1:14
 const HOST = (BASE.match(/^https?:\/\/([^/:]+)/) || [])[1];
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
+// Safety: this suite overwrites 21 days of weights, resets the calorie target,
+// and leaves test meals behind. Never point it at real data by accident.
+if (process.env.ML_ALLOW_LIVE !== '1') {
+  const local = /^(127\.\d+\.\d+\.\d+|localhost|\[::1\])$/.test(HOST || '');
+  let empty = false;
+  try {
+    const h = await (await fetch(new URL('api/history?days=3660', BASE))).json();
+    empty = !(h.weights || []).length && !(h.intake || []).some(d => d.meals);
+  } catch { empty = false; }
+  if (!local || COOKIE || TUNNEL || !empty) {
+    console.error(`refusing to run: ${BASE} is not an empty local throwaway server. ` +
+      'Start one with MACROLOG_DATA=$(mktemp -d), or set ML_ALLOW_LIVE=1 if you really mean it.');
+    process.exit(2);
+  }
+}
+
 const profile = mkdtempSync(join(tmpdir(), 'ml-chrome-'));
 const port = 9557;
 const chrome = spawn(CHROME, [

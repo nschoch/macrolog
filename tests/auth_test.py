@@ -34,7 +34,10 @@ env = dict(os.environ,
            QWENPLAN_API_KEY="",            # no vision needed here
            MACROLOG_SESSION_SECRET=TEST_SESSION_SECRET,
            PYTHONPATH=os.pathsep.join(_pp))
-port = 8791
+import socket as _sock
+with _sock.socket() as _s:                  # a free port, never a shared fixed one
+    _s.bind(("127.0.0.1", 0))
+    port = _s.getsockname()[1]
 proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server.py"),
                          "--host", "127.0.0.1", "--port", str(port)],
                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -57,10 +60,14 @@ def req(path, headers=None, method="GET", body=None, follow=False):
 
 try:
     # wait for boot
-    for _ in range(40):
+    for _ in range(50):
+        if proc.poll() is not None:
+            sys.exit(f"server exited early (code {proc.returncode})")
         try:
             s,_,_ = req("/api/state"); break
         except Exception: time.sleep(0.2)
+    else:
+        sys.exit("server did not come up")
 
     print(f"\nAuth tests -> {BASE} (issuer {ISSUER})\n")
 
