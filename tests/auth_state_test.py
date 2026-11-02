@@ -98,7 +98,44 @@ def main():
     if not check("tampered state blob rejected", tamper_ok):
         failures += 1
 
-    print(f"\n{'PASS' if failures == 0 else 'FAIL'}: {4 - failures}/4 checks passed")
+    # 4) Session key (audit C1): never derived from public values; persisted
+    #    0600 in the data dir so sessions survive restarts.
+    import hashlib
+    import stat
+    import tempfile
+    saved_secret = os.environ.pop("MACROLOG_SESSION_SECRET", None)
+    try:
+        d = tempfile.mkdtemp(prefix="macrolog-key-")
+        src1 = auth.init_session_key(d)
+        k1 = auth._session_key()
+        path = os.path.join(d, auth.SESSION_KEY_FILE)
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        weak = {hashlib.sha256(b"macrolog-session:").digest(),
+                hashlib.sha256(b"macrolog-session:test-client").digest()}
+        if not check("session key file created 0600 and not a public formula",
+                     src1.endswith("(new)") and mode == 0o600 and k1 not in weak,
+                     f"{src1} mode={oct(mode)}"):
+            failures += 1
+        cookie = auth.make_session_cookie({"subject": "u1", "email": "a@b.c"})
+        auth.init_session_key(d)            # simulated restart
+        if not check("session key reused across restart",
+                     auth._session_key() == k1 and auth.read_session_cookie(cookie)):
+            failures += 1
+        os.environ["MACROLOG_SESSION_SECRET"] = "s" * 40
+        auth.init_session_key(d)
+        if not check("MACROLOG_SESSION_SECRET overrides key file; old cookie invalid",
+                     auth._session_key() == b"s" * 40
+                     and auth.read_session_cookie(cookie) is None):
+            failures += 1
+    finally:
+        os.environ.pop("MACROLOG_SESSION_SECRET", None)
+        if saved_secret is not None:
+            os.environ["MACROLOG_SESSION_SECRET"] = saved_secret
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+    total = 7
+    print(f"\n{'PASS' if failures == 0 else 'FAIL'}: {total - failures}/{total} checks passed")
     if failures:
         print("=> OIDC login is fragile across restarts/workers; persist the "
               "pending handshake (server-side store keyed by state, or move "

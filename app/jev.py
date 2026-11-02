@@ -84,8 +84,13 @@ def _ask(state, questions, image_path, timeout=TIMEOUT):
         f"{BASE}/v1/systemone", data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {key}", **_IMAGE_HEADER})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    # Never follow redirects: urllib would replay the Bearer key to the new host.
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    opener = urllib.request.build_opener(_NoRedirect())
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read(4 * 1024 * 1024))
 
 
 def crosscheck(image_paths: list[str], calories: float,

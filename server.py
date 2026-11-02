@@ -30,12 +30,39 @@ from urllib.parse import parse_qs, urlparse, quote as _urlquote, unquote as _url
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+
+def load_env():
+    """Read KEY=VALUE lines from .env next to the project, without overriding env."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(root, ".env"), os.path.join(os.path.dirname(root), ".env")):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        except OSError:
+            pass
+
+
+# Load .env BEFORE the app modules import: several of them (and DATA_DIR,
+# APP_TZ, argparse defaults below) read os.environ at import time. Only when run
+# as a program, so test imports never pick up a developer's .env.
+if __name__ == "__main__":
+    load_env()
+
+
 from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           calibration_multipliers, macronutrient_targets,
                           record_correction, tdee_from_formula, weight_trend)
 from app.database import Database
 from app.vision import (PROVIDER_KINDS, ProviderError, estimate_meal,
                         estimate_photo, estimate_text, provider_default_base,
+                        env_key_for, _same_base,
                         provider_default_model, provider_env_key,
                         provider_key_source)
 from app import auth as OIDC
@@ -137,23 +164,6 @@ def _migrate_shared_providers() -> None:
 
 
 _migrate_shared_providers()
-
-
-def load_env():
-    """Read KEY=VALUE lines from .env next to the project, without overriding env."""
-    for path in (os.path.join(ROOT, ".env"), os.path.join(os.path.dirname(ROOT), ".env")):
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, _, v = line.partition("=")
-                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-        except OSError:
-            pass
 
 
 # Settings keys that are per-person vs shared across all users.
@@ -950,12 +960,20 @@ class Api:
         if kind == "stub":
             return 200, {"models": []}
 
-        base = str(body.get("base_url") or (saved or {}).get("base_url") or
+        saved_base = str((saved or {}).get("base_url") or "").strip().rstrip("/")
+        base = str(body.get("base_url") or saved_base or
                    provider_default_base(kind)).strip().rstrip("/")
         if not _valid_provider_url(base):
             return 400, {"error": "base URL must be a full http(s) URL"}
-        key = str(body.get("api_key") or (saved or {}).get("api_key") or
-                  os.environ.get(provider_env_key(kind), "")).strip()
+        # A key the caller did not type in this request may only travel to the
+        # host it was saved for (or, for the operator's env key, the provider's
+        # default host). Otherwise a draft base_url could exfiltrate it.
+        key = str(body.get("api_key") or "").strip()
+        if not key and saved and saved.get("kind") == kind and saved.get("api_key") \
+                and _same_base(base, saved_base or provider_default_base(kind)):
+            key = str(saved["api_key"]).strip()
+        if not key:
+            key = env_key_for(kind, base)
         try:
             models = _fetch_models(kind, base, key)
         except Exception as e:
@@ -1011,7 +1029,7 @@ class Api:
             shared_by = p.get("shared_by")
             try:
                 key = str(p.get("api_key") or
-                          os.environ.get(provider_env_key(kind), "")).strip()
+                          env_key_for(kind, p.get("base_url"))).strip()
                 if not key and kind not in ("custom", "ollama"):
                     raise ProviderError("no API key configured")
                 base = str(p.get("base_url") or
@@ -2025,20 +2043,59 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _read_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
-            return None, "body too large"
-        raw = self.rfile.read(length) if length else b""
-        ctype = self.headers.get("Content-Type", "")
-        if ctype.startswith("multipart/form-data"):
-            fields, upload = self._parse_multipart(raw, ctype)
-            self._upload = upload          # consumed by POST_estimate
-            return fields, None
+    def _reject_unread(self, status, error):
+        """Answer without reading the body; the connection can't be reused."""
+        self.close_connection = True
+        return self._json(status, {"error": error})
+
+    def _cross_site(self) -> bool:
+        """True for a state-changing request a browser sent from another site.
+
+        Session cookies are SameSite=Lax, which still lets *sibling subdomains*
+        (same site) POST with them, and no-auth mode has no cookie at all.
+        Sec-Fetch-Site is sent by every current browser; Origin is the fallback.
+        Non-browser clients (curl, tests, Shortcuts) send neither and pass.
+        """
+        site = (self.headers.get("Sec-Fetch-Site") or "").lower()
+        if site:
+            return site not in ("same-origin", "none")
+        origin = self.headers.get("Origin")
+        if not origin:
+            return False
+        try:
+            o = urlparse(origin)
+        except ValueError:
+            return True
+        allowed = {h.lower() for h in (self.headers.get("Host"),
+                                       self.headers.get("X-Forwarded-Host"),
+                                       urlparse(os.environ.get("OIDC_REDIRECT_BASE", "")).netloc)
+                   if h}
+        return (o.netloc or "").lower() not in allowed
+
+    def _read_body(self, multipart_ok=False):
         self._upload = None
         self._uploads = []
+        raw_len = (self.headers.get("Content-Length") or "0").strip()
+        if not raw_len.isdigit():
+            return None, "invalid Content-Length"
+        length = int(raw_len)
+        if length > MAX_BODY:
+            return None, "body too large"
+        ctype = self.headers.get("Content-Type", "").lower()
+        if ctype.startswith("multipart/form-data"):
+            if not multipart_ok:
+                return None, "multipart bodies are only accepted for photo uploads"
+            raw = self.rfile.read(length) if length else b""
+            fields, upload = self._parse_multipart(raw, self.headers.get("Content-Type", ""))
+            self._upload = upload          # consumed by POST_estimate
+            return fields, None
+        raw = self.rfile.read(length) if length else b""
         if not raw:
             return {}, None
+        # Only JSON. A text/plain or form-encoded body is what a cross-site
+        # <form> or no-cors fetch can send without a CORS preflight.
+        if not ctype.startswith("application/json"):
+            return None, "Content-Type must be application/json"
         try:
             return json.loads(raw.decode()), None
         except (ValueError, UnicodeDecodeError):
@@ -2122,15 +2179,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/auth/login")
         return self._static(u.path)
 
+    # Routes that take multipart photo uploads. Everything else is JSON-only.
+    MULTIPART_ROUTES = ("/api/estimate", "/api/estimate-meal")
+
     def do_POST(self):
-        self._begin()
-        u = urlparse(self.path)
-        body, err = self._read_body()
-        if err:
-            return self._json(400, {"error": err})
-        if u.path == "/health/ack":
-            return self._health_ack(body or {})
-        return self._route("POST", u.path, parse_qs(u.query), body or {})
+        return self._write("POST")
 
     def do_PATCH(self):
         return self._write("PATCH")
@@ -2142,11 +2195,31 @@ class Handler(BaseHTTPRequestHandler):
         return self._write("DELETE")
 
     def _write(self, verb):
+        """Authenticate and route-check BEFORE touching the body, so anonymous
+        clients can't make the server buffer 20 MB or write temp photos."""
         self._begin()
         u = urlparse(self.path)
-        body, err = self._read_body()
+        path = u.path.rstrip("/") or "/"
+        if verb == "POST" and path == "/health/ack":
+            # Bearer token, never an ambient cookie: no CSRF exposure.
+            if not self._health_token_owner():
+                return self._reject_unread(401, "invalid health token")
+            body, err = self._read_body()
+            if err:
+                return self._reject_unread(400, err)
+            return self._health_ack(body or {})
+        if not path.startswith("/api/"):
+            return self._reject_unread(404, "unknown endpoint")
+        if OIDC.enabled() and self._owner() is None:
+            self.close_connection = True
+            return self._json(401, {"error": "authentication required",
+                                    "login": "/auth/login"})
+        if self._cross_site():
+            return self._reject_unread(403, "cross-site request refused")
+        body, err = self._read_body(
+            multipart_ok=(verb == "POST" and path in self.MULTIPART_ROUTES))
         if err:
-            return self._json(400, {"error": err})
+            return self._reject_unread(413 if "too large" in err else 400, err)
         return self._route(verb, u.path, parse_qs(u.query), body or {})
 
     # -- authentication --------------------------------------------------
@@ -2156,7 +2229,11 @@ class Handler(BaseHTTPRequestHandler):
         if not OIDC.enabled():
             return "default"
         sess = OIDC.read_session_cookie(self._cookies().get(SESSION_COOKIE))
-        return sess["sub"] if sess else None
+        # Re-check the allowlist on every request so removing an email from
+        # OIDC_ALLOWED_EMAILS takes effect without waiting for cookie expiry.
+        if not sess or not OIDC.allowed(sess.get("email")):
+            return None
+        return sess["sub"]
 
     def _auth(self, path, q):
         base = self._base_url()
@@ -2430,6 +2507,16 @@ def lan_ips():
     return ips
 
 
+def _is_loopback_host(host: str) -> bool:
+    if host in ("localhost", ""):
+        return host == "localhost"
+    try:
+        import ipaddress
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="MacroLog self-hosted calorie tracker")
     ap.add_argument("--host", default=os.environ.get("MACROLOG_HOST", "127.0.0.1"))
@@ -2448,6 +2535,16 @@ def main():
 
     load_env()
     os.makedirs(PHOTO_DIR, exist_ok=True)
+    if OIDC.enabled():
+        print(f"  session key: {OIDC.init_session_key(DATA_DIR)}")
+    elif not _is_loopback_host(args.host) and not args.maintain_photos \
+            and os.environ.get("MACROLOG_ALLOW_NO_AUTH", "") != "1":
+        # No-auth mode makes every visitor the same full-access user (read,
+        # export, delete, spend the operator's provider keys). Never do that on
+        # a reachable interface by accident.
+        sys.exit(f"refusing to listen on {args.host} without login: configure "
+                 "OIDC (see .env.example) or set MACROLOG_ALLOW_NO_AUTH=1 to "
+                 "accept a shared no-auth instance on a trusted network.")
     if args.maintain_photos:
         maintain_photos(dry_run=args.dry_run)
         return

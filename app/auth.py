@@ -69,15 +69,55 @@ def discover(issuer: str) -> dict:
 
 
 # ------------------------------------------------------------------- sessions
-_SESSION_KEY = os.environ.get("MACROLOG_SESSION_SECRET", "").encode() or \
-    hashlib.sha256(("macrolog-session:" + os.environ.get("OIDC_CLIENT_ID", "")).encode()).digest()
+# The session HMAC key must be secret. It used to fall back to a hash of the
+# (public) OIDC client id, which let anyone mint a cookie for any subject. Now:
+#   1. MACROLOG_SESSION_SECRET if set, else
+#   2. <data dir>/session.key, created once with 32 random bytes (mode 0600), else
+#   3. a random per-process key (sessions end on restart, but never forgeable).
+# The key is resolved lazily so a .env loaded after import still takes effect.
+_SESSION_KEY: bytes | None = None
+SESSION_KEY_FILE = "session.key"
+
+
+def init_session_key(data_dir: str | None = None) -> str:
+    """Resolve the session key now; returns where it came from (for logging)."""
+    global _SESSION_KEY
+    env = os.environ.get("MACROLOG_SESSION_SECRET", "").strip()
+    if env:
+        _SESSION_KEY = env.encode()
+        return "env" if len(env) >= 32 else "env (short: use 32+ random chars)"
+    if data_dir:
+        path = os.path.join(data_dir, SESSION_KEY_FILE)
+        try:
+            with open(path, "rb") as fh:
+                key = fh.read().strip()
+            if len(key) >= 32:
+                _SESSION_KEY = key
+                return path
+        except FileNotFoundError:
+            pass
+        os.makedirs(data_dir, exist_ok=True)
+        key = _b64url(secrets.token_bytes(32)).encode()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+        _SESSION_KEY = key
+        return path + " (new)"
+    _SESSION_KEY = secrets.token_bytes(32)
+    return "ephemeral"
+
+
+def _session_key() -> bytes:
+    if _SESSION_KEY is None:
+        init_session_key(os.environ.get("MACROLOG_DATA") or None)
+    return _SESSION_KEY  # type: ignore[return-value]
 
 
 def make_session_cookie(user: dict) -> str:
     payload = {"sub": user["subject"], "email": user.get("email"),
                "name": user.get("name"), "exp": int(time.time()) + 7 * 86400}
     body = _b64url(json.dumps(payload).encode())
-    sig = _b64url(hmac.new(_SESSION_KEY, body.encode(), hashlib.sha256).digest())
+    sig = _b64url(hmac.new(_session_key(), body.encode(), hashlib.sha256).digest())
     return f"{body}.{sig}"
 
 
@@ -85,7 +125,7 @@ def read_session_cookie(raw: str | None) -> dict | None:
     if not raw or "." not in raw:
         return None
     body, _, sig = raw.rpartition(".")
-    expect = _b64url(hmac.new(_SESSION_KEY, body.encode(), hashlib.sha256).digest())
+    expect = _b64url(hmac.new(_session_key(), body.encode(), hashlib.sha256).digest())
     if not hmac.compare_digest(sig, expect):
         return None
     try:

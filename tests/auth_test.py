@@ -23,6 +23,8 @@ HS_SECRET = mock_oidc.HS_SECRET.decode()   # shared HMAC key for HS256 path
 
 # ---- start MacroLog with OIDC enabled -------------------------------------
 work = tempfile.mkdtemp(prefix="macrolog-auth-")
+import secrets as _secrets
+TEST_SESSION_SECRET = _secrets.token_urlsafe(32)
 _pp = [ROOT] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
 env = dict(os.environ,
            MACROLOG_DATA=work,
@@ -30,6 +32,7 @@ env = dict(os.environ,
            OIDC_CLIENT_ID="macrolog",
            OIDC_CLIENT_SECRET=HS_SECRET,    # HS256 mock; RS256 verified on the LXC
            QWENPLAN_API_KEY="",            # no vision needed here
+           MACROLOG_SESSION_SECRET=TEST_SESSION_SECRET,
            PYTHONPATH=os.pathsep.join(_pp))
 port = 8791
 proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "server.py"),
@@ -122,6 +125,28 @@ try:
     st,hd,bd = req("/api/history?days=90")
     check("history still requires auth", st==401)
 
+    # Regression (audit H1): anonymous uploads must be refused before the body
+    # is read -- no temp photo may land on disk.
+    photo_dir = os.path.join(work, "photos")
+    before = set(os.listdir(photo_dir)) if os.path.isdir(photo_dir) else set()
+    bnd = "----x"
+    mp = (f"--{bnd}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.jpg\"\r\n"
+          f"Content-Type: image/jpeg\r\n\r\n").encode() + b"\xff" * 200_000 + f"\r\n--{bnd}--\r\n".encode()
+    for path in ("/api/estimate", "/api/estimate-meal", "/not-an-endpoint"):
+        r = urllib.request.Request(BASE + path, data=mp, method="POST",
+                                   headers={"Content-Type": f"multipart/form-data; boundary={bnd}"})
+        try:
+            urllib.request.urlopen(r, timeout=15)
+            code = 200
+        except urllib.error.HTTPError as e:
+            code = e.code
+        except Exception:
+            code = -1                          # server closed early: also fine
+        check(f"anonymous multipart to {path} refused", code in (401, 404, -1), str(code))
+    after = set(os.listdir(photo_dir)) if os.path.isdir(photo_dir) else set()
+    tmp_new = [f for f in after - before if f.startswith("tmp-")]
+    check("no temp photo written for anonymous uploads", not tmp_new, str(tmp_new))
+
     # 8. forged/absent session rejected
     st,hd,bd = req("/api/state", headers={"Cookie":"macrolog_session=garbage"})
     check("bad session -> 401", st==401, str(st))
@@ -130,18 +155,25 @@ try:
     #    (proves owner-scoping in queries, not just the login gate).
     sys.path.insert(0, ROOT)
     from app import auth as _a
-    # The server process has its own _SESSION_KEY derived from OIDC_CLIENT_ID;
-    # replicate it here so we can mint a valid cookie for a different subject.
+    # The test owns the server's session secret, so it can mint a valid
+    # cookie for a different subject.
     import hashlib as _hl
-    key = os.environ.get("MACROLOG_SESSION_SECRET","").encode() or \
-        _hl.sha256(("macrolog-session:macrolog").encode()).digest()
-    def cookie_for(sub, email):
+    key = TEST_SESSION_SECRET.encode()
+    def cookie_for(sub, email, key=key):
         payload={"sub":sub,"email":email,"name":email.split("@")[0],"exp":int(time.time())+3600}
         body=_a._b64url(json.dumps(payload).encode())
         sig=_a._b64url(__import__("hmac").new(key, body.encode(), _hl.sha256).digest())
         return f"{body}.{sig}"
     ck_a = cookie_val                       # user-abc / test@example.com
     ck_b = cookie_for("user-xyz", "other@example.com")
+
+    # Regression (audit C1): the key used to fall back to a hash of the public
+    # client id, or to a constant when the secret came from .env after import.
+    for label, weak in (("client-id formula", _hl.sha256(b"macrolog-session:macrolog").digest()),
+                        ("empty-id constant", _hl.sha256(b"macrolog-session:").digest())):
+        forged = cookie_for("user-abc", "test@example.com", key=weak)
+        st,_,_ = req("/api/state", headers={"Cookie":"macrolog_session="+forged})
+        check(f"cookie forged with {label} -> 401", st == 401, str(st))
 
     # user A logs a meal; then B's history must NOT contain it.
     req("/api/meals", method="POST", headers={"Cookie":"macrolog_session="+ck_a},

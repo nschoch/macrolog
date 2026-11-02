@@ -159,13 +159,30 @@ def encode_image(path: str, max_dim: int = 1024, quality: int = 82) -> tuple[str
     return base64.b64encode(raw_bytes).decode(), mime
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Fail on 3xx: urllib would otherwise replay Authorization to the new host."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024      # a meal estimate is a few KB
+
+
+def _read_capped(resp) -> bytes:
+    raw = resp.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise ProviderError("provider response too large")
+    return raw
+
+
 def _post(url: str, payload: dict, headers: dict, timeout: int = 90) -> dict:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+        with _OPENER.open(req, timeout=timeout) as resp:
+            return json.loads(_read_capped(resp))
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:500]
         raise ProviderError(f"HTTP {e.code}: {body}") from None
@@ -175,8 +192,8 @@ def _post(url: str, payload: dict, headers: dict, timeout: int = 90) -> dict:
 
 def _get_json(url: str, headers: dict, timeout: int = 45) -> dict:
     req = urllib.request.Request(url, headers={**headers})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    with _OPENER.open(req, timeout=timeout) as resp:
+        return json.loads(_read_capped(resp))
 
 
 def _structured(payload: dict, name: str) -> dict:
@@ -289,7 +306,7 @@ class GeminiProvider:
 
     def __init__(self, cfg: dict):
         self.key = str(cfg.get("api_key") or
-                       os.environ.get("GEMINI_API_KEY", "")).strip()
+                       env_key_for("gemini", cfg.get("base_url"))).strip()
         self.model = str(cfg.get("model") or "gemini-2.5-flash").strip()
         self.base = str(cfg.get("base_url") or
                         "https://generativelanguage.googleapis.com").rstrip("/")
@@ -403,9 +420,8 @@ class OpenAICompatProvider:
 
     def __init__(self, cfg: dict, name: str = "openai"):
         self.name = name
-        env_var = openai_compat_env_keys.get(name, "")
         self.key = str(cfg.get("api_key") or
-                       (os.environ.get(env_var, "") if env_var else "")).strip()
+                       env_key_for(name, cfg.get("base_url"))).strip()
         base, model = openai_compat_defaults.get(name, ("", ""))
         stored_model = str(cfg.get("model") or "").strip()
         stored_base = str(cfg.get("base_url") or "").strip()
@@ -679,6 +695,28 @@ def provider_default_base(kind: str) -> str:
     return openai_compat_defaults.get(kind, ("", ""))[0].rstrip("/")
 
 
+def _same_base(a: str | None, b: str | None) -> bool:
+    return (a or "").strip().rstrip("/").lower() == (b or "").strip().rstrip("/").lower()
+
+
+def env_key_for(kind: str, base_url: str | None = None) -> str:
+    """The operator's env key for `kind`, but ONLY for the provider's own
+    default (or operator-set env) base URL.
+
+    A user-chosen base URL must never receive the operator's key: otherwise
+    anyone who can save a provider or ask for a model list can point it at a
+    host they control and read the key off the Authorization header.
+    """
+    var = provider_env_key(kind)
+    key = os.environ.get(var, "").strip() if var else ""
+    if not key:
+        return ""
+    if base_url and str(base_url).strip() and \
+            not _same_base(str(base_url), provider_default_base(kind)):
+        return ""
+    return key
+
+
 def provider_default_model(kind: str) -> str:
     """Built-in / env / explicit default model for a provider kind."""
     if kind == "gemini":
@@ -700,8 +738,7 @@ def provider_key_source(entry: dict) -> str | None:
     """
     if entry.get("api_key"):
         return "saved"
-    env = provider_env_key(entry.get("kind", ""))
-    if env and os.environ.get(env):
+    if env_key_for(entry.get("kind", ""), entry.get("base_url")):
         return "env"
     return None
 
@@ -718,7 +755,7 @@ def _ollama_reachable(base_url: str) -> bool:
     ok = False
     try:
         req = urllib.request.Request(base_url.rstrip("/") + "/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=1.5) as r:
+        with _OPENER.open(req, timeout=1.5) as r:
             ok = r.status == 200
     except Exception:
         ok = False
@@ -738,9 +775,8 @@ def _has_credentials(entry: dict) -> bool:
         return bool(entry.get("base_url"))
     if entry.get("api_key"):
         return True
-    env = provider_env_key(kind or "")
-    if env:
-        return bool(os.environ.get(env))
+    if provider_env_key(kind or ""):
+        return bool(env_key_for(kind or "", entry.get("base_url")))
     if kind == "ollama":
         base = entry.get("base_url") or os.environ.get(
             "OLLAMA_HOST", "http://127.0.0.1:11434")

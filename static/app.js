@@ -74,8 +74,10 @@ function clientTz() {
 }
 
 async function api(path, opts = {}) {
+  // The server only accepts JSON bodies labelled as JSON (CSRF hardening).
+  const json = typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {};
   const res = await fetchWithTimeout('/api/' + path,
-    { ...opts, headers: { ...(opts.headers || {}), 'X-Client-TZ': clientTz() } });
+    { ...opts, headers: { ...json, ...(opts.headers || {}), 'X-Client-TZ': clientTz() } });
   let data = {};
   try { data = await res.json(); } catch (_) { /* empty body */ }
   if (res.status === 401 && data.login) {

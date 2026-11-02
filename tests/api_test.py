@@ -873,6 +873,35 @@ finally:
     mock.shutdown()
     mock.server_close()
 
+# ------------------------------------------- audit H1/H3: request-entry guards
+import socket as _socket
+from urllib.parse import urlparse as _up
+
+_meal = {"description": "csrf probe", "calories": 100}
+st, _ = req("/api/meals", "POST", raw_body=json.dumps(_meal).encode(),
+            headers={"Content-Type": "text/plain"})
+check("JSON route refuses text/plain bodies (no-preflight CSRF)", st == 400, str(st))
+st, _ = req("/api/meals", "POST", _meal, headers={"Sec-Fetch-Site": "cross-site"})
+check("cross-site Sec-Fetch-Site refused", st == 403, str(st))
+st, _ = req("/api/meals", "POST", _meal, headers={"Sec-Fetch-Site": "same-site"})
+check("same-site (sibling subdomain) Sec-Fetch-Site refused", st == 403, str(st))
+st, _ = req("/api/meals", "POST", _meal, headers={"Origin": "https://evil.example"})
+check("foreign Origin refused", st == 403, str(st))
+st, _ = req("/api/meals", "POST", {"description": "same-origin ok", "calories": 1,
+                                    "date": "2000-01-01"},
+            headers={"Sec-Fetch-Site": "same-origin", "Origin": BASE})
+check("same-origin browser request still accepted", st in (200, 201), str(st))
+st, _ = req("/api/meals", "POST", raw_body=b"--x\r\n\r\n--x--",
+            headers={"Content-Type": "multipart/form-data; boundary=x"})
+check("multipart refused outside the photo routes", st == 400, str(st))
+
+_u = _up(BASE)
+with _socket.create_connection((_u.hostname, _u.port), timeout=10) as sk:
+    sk.sendall(b"POST /api/meals HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+               b"Content-Length: -1\r\n\r\n{}")
+    first = sk.recv(200).decode(errors="replace").split("\r\n", 1)[0]
+check("negative Content-Length rejected without reading to EOF", " 400 " in first, first)
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))

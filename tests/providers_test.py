@@ -224,6 +224,7 @@ def fake_open_json(url, headers=None, timeout=20):
     return openrouter_fixture
 
 
+_real_open_json = server._open_json
 server._open_json = fake_open_json
 models = server._fetch_models("openrouter", "https://openrouter.ai/api/v1", "test-key-x")
 check("OpenRouter discovery keeps only image-input, non-batch models",
@@ -282,6 +283,89 @@ try:
           "reasoning_effort" not in captured, str(captured)[:120])
 finally:
     vision._post = _orig_post
+
+# ------------------------------------------- audit C2: key exfiltration guards
+# A real local "attacker" server records any Authorization header it receives.
+import http.server  # noqa: E402
+import threading  # noqa: E402
+
+HITS = []
+
+
+class _Capture(http.server.BaseHTTPRequestHandler):
+    def _hit(self):
+        HITS.append((self.command, self.path,
+                     self.headers.get("Authorization") or self.headers.get("x-goog-api-key")))
+        if self.path.startswith("/redir"):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{CAP_PORT}/stolen")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = b'{"data": [], "models": []}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    do_GET = do_POST = _hit
+
+    def log_message(self, *a):
+        pass
+
+
+cap = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Capture)
+CAP_PORT = cap.server_address[1]
+threading.Thread(target=cap.serve_forever, daemon=True).start()
+EVIL = f"http://127.0.0.1:{CAP_PORT}/v1"
+
+os.environ["OPENAI_API_KEY"] = "sk-OPERATOR-SECRET"
+os.environ["GEMINI_API_KEY"] = "AIza-OPERATOR-SECRET"
+try:
+    check("env key served for the default base",
+          vision.env_key_for("openai") == "sk-OPERATOR-SECRET"
+          and vision.env_key_for("openai", "https://api.openai.com/v1/") == "sk-OPERATOR-SECRET")
+    check("env key withheld from a custom base",
+          vision.env_key_for("openai", EVIL) == ""
+          and vision.env_key_for("gemini", EVIL) == "")
+    check("provider instances never pair env key with custom base",
+          vision.OpenAICompatProvider({"kind": "openai", "base_url": EVIL}, "openai").key == ""
+          and vision.GeminiProvider({"kind": "gemini", "base_url": EVIL}).key == "")
+    shared_evil = {"providers": [], "shared_providers": [
+        {"kind": "openai", "base_url": EVIL, "shared": True, "id": "x"}]}
+    chain = vision.build_chain(shared_evil)
+    check("keyless shared provider on a custom host is not usable via env key",
+          all(isinstance(p, vision.StubProvider) for p in chain), str(chain))
+    check("key_source is not 'env' for a custom base",
+          vision.provider_key_source({"kind": "openai", "base_url": EVIL}) is None)
+
+    class _H:
+        owner = "carol"
+    server.save_user_settings("carol", {"providers": [
+        {"id": "p1", "kind": "openai", "api_key": "sk-CAROL-SAVED",
+         "base_url": "https://api.openai.com/v1"}]})
+    server._open_json = _real_open_json       # hit the real network path
+    HITS.clear()
+    for body in ({"kind": "openai", "base_url": EVIL},
+                 {"kind": "gemini", "base_url": EVIL.rsplit("/v1", 1)[0]},
+                 {"provider_id": "p1", "base_url": EVIL}):
+        server.Api.POST_provider_models(_H(), {}, body)
+    leaked = [h for h in HITS if h[2] and ("OPERATOR" in h[2] or "CAROL" in h[2])]
+    check("/api/provider/models never sends env/saved keys to a caller-chosen URL",
+          len(HITS) >= 3 and not leaked, str(HITS))
+
+    HITS.clear()
+    try:
+        vision._post(f"http://127.0.0.1:{CAP_PORT}/redir", {}, {"Authorization": "Bearer sk-X"})
+        redirected = True
+    except vision.ProviderError:
+        redirected = False
+    check("vision._post does not follow redirects (no Authorization replay)",
+          not redirected and not any(p == "/stolen" for _, p, _ in HITS), str(HITS))
+finally:
+    os.environ.pop("OPENAI_API_KEY", None)
+    os.environ.pop("GEMINI_API_KEY", None)
+    cap.shutdown()
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
