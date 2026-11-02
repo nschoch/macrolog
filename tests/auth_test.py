@@ -186,6 +186,57 @@ try:
     check("user A sees their meal", a_sees, str(dA.get("intake"))[:80])
     check("user B sees NO data (isolated)", b_empty, str(dB.get("intake"))[:80])
 
+    # 9b. PHOTO OWNERSHIP (audit H2): B can't read, rescan, steal, or move
+    #     A's photos, including whole dated photo folders.
+    def upload(cookie):
+        b = "----p"
+        jpg = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffd9")
+        body = (f"--{b}\r\nContent-Disposition: form-data; name=\"photos\"; filename=\"p.jpg\"\r\n"
+                f"Content-Type: image/jpeg\r\n\r\n").encode() + jpg + f"\r\n--{b}--\r\n".encode()
+        r = urllib.request.Request(BASE + "/api/estimate-meal", data=body, method="POST",
+                                   headers={"Cookie": "macrolog_session=" + cookie,
+                                            "Content-Type": f"multipart/form-data; boundary={b}"})
+        try:
+            with urllib.request.urlopen(r, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return {"error": e.read().decode(errors="replace")}
+    HA = {"Cookie": "macrolog_session=" + ck_a}
+    HB = {"Cookie": "macrolog_session=" + ck_b}
+    estA = upload(ck_a)
+    tempsA = estA.get("temp_photos") or []
+    check("estimate returns opaque temp names, not server paths",
+          len(tempsA) == 1 and "/" not in tempsA[0] and os.sep not in tempsA[0], str(estA)[:160])
+    st,_,_ = req("/api/meals", method="POST", headers=HB,
+                 body={"description": "steal", "calories": 1, "photos": tempsA})
+    check("B cannot attach A's temp upload", st == 400, str(st))
+    st,_,bd = req("/api/meals", method="POST", headers=HA,
+                  body={"description": "A photo meal", "calories": 300, "photos": tempsA})
+    check("A can save with own temp upload", st == 201, bd[:120])
+    _,_,bdS = req("/api/state", headers=HA)
+    savedA = [ph for m in json.loads(bdS).get("meals", []) for ph in (m.get("photos") or [])]
+    check("A's meal has a saved photo", len(savedA) == 1, str(savedA))
+    if savedA:
+        st,_,_ = req("/api/photo/" + savedA[0], headers=HA)
+        check("A can view own photo", st == 200, str(st))
+        st,_,_ = req("/api/photo/" + savedA[0], headers=HB)
+        check("B cannot view A's photo", st == 404, str(st))
+        st,_,_ = req("/api/rescan", method="POST", headers=HB, body={"photos": savedA})
+        check("B cannot rescan A's photo", st == 400, str(st))
+    dated = [d for d in os.listdir(photo_dir) if os.path.isdir(os.path.join(photo_dir, d))]
+    for d in dated:
+        st,_,_ = req("/api/meals", method="POST", headers=HB,
+                     body={"description": "x", "calories": 1,
+                           "photos": [os.path.join(photo_dir, d)]})
+        check(f"B cannot move photo folder {d}", st == 400
+              and os.path.isdir(os.path.join(photo_dir, d)), str(st))
+    if savedA:
+        st,_,_ = req("/api/meals", method="POST", headers=HB,
+                     body={"description": "", "calories": -5,
+                           "photo_path": os.path.join(photo_dir, dated[0], savedA[0])})
+        still = os.path.isfile(os.path.join(photo_dir, dated[0], savedA[0]))
+        check("negative-calorie save cannot delete another user's photo", still, str(st))
+
     # 10. PROVIDER KEYS ARE PER-USER: B must not inherit or see A's key.
     SECRET = "test-key-auth-do-not-leak"
     stA,_,bdA = req("/api/settings", method="PUT",

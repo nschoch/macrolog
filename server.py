@@ -446,7 +446,7 @@ class Api:
         if s.get("calibrate_estimates"):
             meal, changed = apply_calibration(meal, calibration_multipliers(db, owner=owner))
         out = {"estimate": meal, "provider": provider, "model": model,
-               "calibrated": changed, "temp_photo": path}
+               "calibrated": changed, "temp_photo": os.path.basename(path)}
         errs = meal.get("_provider_errors")
         if errs:
             out["warning"] = _provider_warning(errs)
@@ -494,7 +494,7 @@ class Api:
                "calibrated": changed,
                # Client keeps these and hands them back on save so every photo
                # ends up attached to the meal rather than orphaned in tmp.
-               "temp_photos": images}
+               "temp_photos": [os.path.basename(p) for p in images]}
         # Optional second opinion: Jev is discriminative (typed questions, no
         # free text), so it cannot produce an estimate -- but it is a fast,
         # well-calibrated judge of whether this total is plausible for the
@@ -520,7 +520,7 @@ class Api:
         """
         owner = getattr(h, "owner", "default")
         names = [str(x) for x in (body.get("photos") or [])][:4]
-        paths = [p for p in (_resolve_photo(n) for n in names) if p]
+        paths = [p for p in (_owned_photo(n, owner) for n in names) if p]
         if not paths:
             return 400, {"error": "no photo available to rescan"}
         text = str(body.get("text") or "").strip()[:2000]
@@ -585,12 +585,19 @@ class Api:
     def POST_meals(h, q, body):
         owner = getattr(h, "owner", "default")
         s = get_settings(owner)
-        photo = body.get("photo_path")
         source = body.get("source", "photo")
-        for cand in [photo, *(body.get("photos") or [])]:
-            if cand and not os.path.abspath(str(cand)).startswith(
-                    os.path.abspath(PHOTO_DIR)):
-                return 400, {"error": "invalid photo path"}
+        # Accept several photos (e.g. the plate AND its Nutrition Facts label):
+        # `photos` is a list, `photo_path` a single temp file for older clients.
+        # Only this user's own temp uploads are accepted -- never a client path.
+        raw_photos = body.get("photos") or ([body["photo_path"]] if body.get("photo_path") else [])
+        if not isinstance(raw_photos, list):
+            return 400, {"error": "photos must be a list"}
+        tmp_list = []
+        for cand in raw_photos[:8]:
+            owned = _owned_temp(cand, owner)
+            if not owned:
+                return 400, {"error": "invalid or expired photo; retake it"}
+            tmp_list.append(owned)
         tz = h._tz()
         d = body.get("date") or today_str(tz)
         ts = _parse_when(body, default_date=d, tz=tz)
@@ -611,21 +618,14 @@ class Api:
         # supplements). Only reject when there is nothing at all to record.
         has_content = bool(str(meal.get("description") or "").strip()) or bool(items)
         if meal["calories"] < 0:
-            if photo and os.path.exists(photo):
-                os.remove(photo)
+            for t in tmp_list:
+                _unlink(t)
             return 400, {"error": "calories cannot be negative"}
         if meal["calories"] == 0 and not has_content:
-            if photo and os.path.exists(photo):
-                os.remove(photo)
+            for t in tmp_list:
+                _unlink(t)
             return 400, {"error": "add a description or components "
                                   "(calories may be 0 for supplements)"}
-        # Accept several photos (e.g. the plate AND its Nutrition Facts label):
-        # `photos` is a list, `photo_path` a single temp file for older clients.
-        tmp_list = [str(x) for x in (body.get("photos") or []) if x]
-        if not tmp_list and photo:
-            tmp_list = [photo]
-        tmp_list = [x for x in tmp_list
-                    if os.path.abspath(x).startswith(os.path.abspath(PHOTO_DIR))]
         final_path = _store_photos([_promote_photo(x) for x in tmp_list])
         mid = db.add_meal(
             date=d, ts=ts,
@@ -1629,6 +1629,50 @@ def group_meals(meals: list[dict], gap_minutes: int = 45, tz=None) -> list[dict]
     return out
 
 
+_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif")
+
+
+def _photo_tag(owner: str) -> str:
+    """Short, stable per-owner tag embedded in temp upload names."""
+    return hashlib.sha256(("photo-owner:" + str(owner)).encode()).hexdigest()[:12]
+
+
+def _temp_name(owner: str, ext: str) -> str:
+    return f"tmp-{_photo_tag(owner)}-{uuid.uuid4().hex}{ext}"
+
+
+def _owned_temp(name, owner: str) -> str | None:
+    """Full path of a temp upload IF it was uploaded by `owner`.
+
+    Clients only ever hand back the opaque basename the estimate returned (old
+    clients sent the absolute path; only its basename is used). Anything else --
+    another user's temp, a saved photo, a directory -- is refused.
+    """
+    safe = os.path.basename(str(name or ""))
+    m = re.fullmatch(r"tmp-([0-9a-f]{12})-[0-9a-f]{32}(\.[a-z]+)", safe)
+    if not m or m.group(1) != _photo_tag(owner) or m.group(2) not in _PHOTO_EXTS:
+        return None
+    path = os.path.join(PHOTO_DIR, safe)
+    return path if os.path.isfile(path) else None
+
+
+def _owned_saved(name, owner: str) -> str | None:
+    """Full path of a saved meal photo IF one of `owner`'s meals references it."""
+    safe = os.path.basename(str(name or ""))
+    if not safe or safe.startswith((".", "tmp-")):
+        return None
+    rows = db.query("SELECT photo_path FROM meals WHERE owner=? AND photo_path IS NOT NULL "
+                    "AND instr(photo_path, ?) > 0", (owner, safe))
+    if not any(safe in _photo_list(r["photo_path"]) for r in rows):
+        return None
+    path = _resolve_photo(safe)
+    return path if path and os.path.dirname(path) != PHOTO_DIR else None
+
+
+def _owned_photo(name, owner: str) -> str | None:
+    return _owned_temp(name, owner) or _owned_saved(name, owner)
+
+
 def _resolve_photo(name) -> str | None:
     """Find a stored/temp photo by basename, guarding against traversal.
 
@@ -2146,7 +2190,8 @@ class Handler(BaseHTTPRequestHandler):
                 if ext not in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"):
                     ext = ".jpg"
                 os.makedirs(PHOTO_DIR, exist_ok=True)
-                tmp = os.path.join(PHOTO_DIR, f"tmp-{uuid.uuid4().hex}{ext}")
+                tmp = os.path.join(PHOTO_DIR, _temp_name(
+                    getattr(self, "_upload_owner", None) or "default", ext))
                 with open(tmp, "wb") as fh:
                     fh.write(body)
                 pair = (tmp, guess_mime(ext))
@@ -2210,7 +2255,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._health_ack(body or {})
         if not path.startswith("/api/"):
             return self._reject_unread(404, "unknown endpoint")
-        if OIDC.enabled() and self._owner() is None:
+        self._upload_owner = self._owner()
+        if OIDC.enabled() and self._upload_owner is None:
             self.close_connection = True
             return self._json(401, {"error": "authentication required",
                                     "login": "/auth/login"})
@@ -2430,30 +2476,30 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(st, pl)
 
     def _photo(self, name):
-        safe = os.path.basename(name)
-        for d in (PHOTO_DIR, *[os.path.join(PHOTO_DIR, x) for x in os.listdir(PHOTO_DIR)
-                               if os.path.isdir(os.path.join(PHOTO_DIR, x))]):
-            candidate = os.path.join(d, safe)
-            if os.path.isfile(candidate):
-                mime = mimetypes.guess_type(candidate)[0] or "image/jpeg"
-                with open(candidate, "rb") as fh:
-                    data = fh.read()
-                self.send_response(200)
-                self.send_header("Content-Type", mime)
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "private, max-age=86400")
-                self.end_headers()
-                try:
-                    self.wfile.write(data)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-                return
-        self._json(404, {"error": "photo not found"})
+        # Only photos this user uploaded or saved; other users' names 404.
+        path = _owned_photo(_urlunquote(name), getattr(self, "owner", "default"))
+        if not path:
+            return self._json(404, {"error": "photo not found"})
+        mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+        with open(path, "rb") as fh:
+            data = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        # Revalidate every time: a shared device must not keep showing photos
+        # from the HTTP cache after logout.
+        self.send_header("Cache-Control", "private, no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _static(self, path):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(STATIC_DIR, rel))
-        if not full.startswith(STATIC_DIR) or not os.path.isfile(full):
+        if not full.startswith(STATIC_DIR + os.sep) or not os.path.isfile(full):
             full = os.path.join(STATIC_DIR, "index.html")
             if not os.path.isfile(full):
                 return self._json(404, {"error": "not found"})
