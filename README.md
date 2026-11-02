@@ -63,7 +63,10 @@ python3 server.py             # → http://localhost:8765
 ```
 
 Open it on your phone by running with `--host 0.0.0.0` and visiting the LAN/
-Netbird address it prints. In mobile Safari, **Add to Home Screen** for a
+Netbird address it prints. Without OIDC (below), everyone who can reach that
+address is the same full-access user, so the server refuses a non-loopback bind
+unless you either configure OIDC or explicitly accept a shared no-login instance
+with `MACROLOG_ALLOW_NO_AUTH=1` on a network you trust. In mobile Safari, **Add to Home Screen** for a
 full-screen app with camera access.
 
 ### Getting an AI provider
@@ -145,7 +148,11 @@ calibration history are stored separately (keyed by their OIDC `sub`).
 
 Security notes: the flow is Authorization Code + PKCE with state + nonce; ID
 tokens are signature-verified and fail **closed** if `cryptography` is missing.
-Set `OIDC_ALLOWED_EMAILS=a@x.com,b@y.com` to restrict who may enter; leave blank
+Sessions are HMAC-signed cookies keyed by `MACROLOG_SESSION_SECRET` if set,
+otherwise by a random key generated once into `data/session.key` (mode 0600).
+Keep that file with your backups; deleting or changing it signs everyone out.
+Set `OIDC_ALLOWED_EMAILS=a@x.com,b@y.com` to restrict who may enter (checked on
+every request, so removing an address takes effect immediately); leave blank
 to admit anyone your Pocket ID authenticates. Behind Caddy, `X-Forwarded-Proto`
 is honored automatically; set `OIDC_REDIRECT_BASE` only if you see a
 redirect_uri mismatch. Disable auth entirely by clearing `OIDC_ISSUER`.
@@ -176,20 +183,30 @@ macrolog.example.com {
 ```
 
 Then `caddy reload`. If Caddy runs on a different machine than the LXC, set
-`MACROLOG_HOST=0.0.0.0` in the unit and point `reverse_proxy` at the LXC's IP
+`MACROLOG_HOST=0.0.0.0` in `/opt/macrolog/.env` (it overrides the unit's
+`Environment=` lines) and point `reverse_proxy` at the LXC's IP
 (see Option B in the snippet). Full phone-trust walkthrough (ACME vs Caddy's
 internal CA): [`deploy/IPHONE_TRUST.md`](deploy/IPHONE_TRUST.md).
 
-The app uses only relative URLs and no auth, so it sits cleanly behind any
-reverse proxy — just keep it off the public internet (single-user by design;
-restrict via Caddy auth, Netbird ACLs, or a firewall).
+The app uses only relative URLs, so it sits cleanly behind any reverse proxy.
+Keep it off the public internet either way: enable OIDC for more than one
+person, and restrict access with Netbird/Tailscale ACLs or a firewall.
 
 ### Or with Docker
 
 ```bash
 docker build -t macrolog .
-docker run -d --name macrolog -p 8765:8765 -v $(pwd)/data:/data macrolog
+# With OIDC (recommended): pass your OIDC_* settings, e.g. --env-file .env
+docker run -d --name macrolog -p 127.0.0.1:8765:8765 --env-file .env \
+  -v $(pwd)/data:/data macrolog
+# Single-user, no login, loopback only:
+docker run -d --name macrolog -p 127.0.0.1:8765:8765 -e MACROLOG_ALLOW_NO_AUTH=1 \
+  -v $(pwd)/data:/data macrolog
 ```
+
+The image runs as a non-root user (uid 10001; `chown 10001 data` on the host if
+needed), contains only `server.py`, `app/` and `static/`, and exposes an
+unauthenticated `/healthz` for the health check.
 
 Prefer no proxy? The server can also terminate TLS itself:
 `--tls-cert tls/macrolog.crt --tls-key tls/macrolog.key`
@@ -224,18 +241,31 @@ app/
   vision.py          provider layer: openrouter / custom / qwenplan / groq / gemini / openai / ollama / stub
   foods.py           folds verbose model labels to generic foods for quick logging
   adaptive.py        weight→target loop + estimate calibration + food groups
+  auth.py            OIDC relying party + signed session cookies
+  jev.py             optional Jev plausibility cross-check (off unless JEV_API_KEY)
 static/              mobile-first PWA (vanilla JS, no build step)
-tests/api_test.py    end-to-end API checks
-deploy/              provision.sh, systemd unit, Dockerfile
+tests/               unit, API, auth, and headless-browser suites (see CI)
+deploy/              provision.sh, systemd unit, Caddy snippet, cert helper
+Dockerfile           container image (code only; see .dockerignore)
 data/                runtime: sqlite + photos (gitignored — this is your backup)
 ```
 
 ## Backups & privacy
 
-Back up by copying `data/`. Photos stay on your machine; only the image bytes go
-to whichever provider you configure. Provider keys live in that same SQLite
-file (per user), are never sent back to the browser after saving, and are
-excluded from JSON exports. Nothing else leaves your network. See
+Back up `data/`: the SQLite database, `photos/`, and `session.key`. The database
+runs in WAL mode, so copy it with `sqlite3 data/macrolog.sqlite ".backup
+backup.sqlite"` (or stop the service first) instead of copying the live file.
+Treat backups as secrets: provider keys live in that same SQLite file (per
+user). They are never sent back to the browser after saving and are excluded
+from JSON exports. To restore, stop the service, put the files back, and
+re-apply ownership (`chown -R macrolog:macrolog data && chmod 700 data`).
+
+Photos stay on your machine; only the image bytes go to whichever provider you
+configure. Operator `.env` keys are only ever sent to that provider's default
+endpoint, never to a custom base URL. The one optional exception is the Jev
+cross-check: if the operator sets `JEV_API_KEY`, the first photo of each photo
+estimate is also sent to api.typesafe.ai for a plausibility check. Nothing else
+leaves your network. See
 [SECURITY.md](SECURITY.md) for private vulnerability reporting and deployment
 hardening.
 

@@ -25,6 +25,11 @@ The `main` branch is the supported version.
 - Put the app behind HTTPS (Caddy or equivalent) before exposing it.
 - Enable OIDC and allowlist emails if the host is reachable beyond your devices.
   Otherwise bind to localhost or restrict access with a firewall/VPN.
+- Sessions are signed with `MACROLOG_SESSION_SECRET` or, if unset, a random
+  `data/session.key` created on first start. Never reuse a public value; rotate
+  the secret (or delete the key file) to sign everyone out.
+- The server refuses to listen on a non-loopback address without OIDC unless
+  `MACROLOG_ALLOW_NO_AUTH=1` is set. Only set it on a network you trust.
 - Keep `.env` and `data/` out of version control — both are gitignored; neither
   has ever been committed to this repo.
 - Rotate provider keys and the Apple Health token if they may have been exposed.

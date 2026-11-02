@@ -18,3 +18,13 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Secrets / certificates (make-cert.sh writes ./tls by default)
+.env.*
+!.env.example
+tls/
+*.key
+*.pem
+*.crt
+*.sqlite-journal
+node_modules/

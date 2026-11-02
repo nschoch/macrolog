@@ -2287,6 +2287,8 @@ class Handler(BaseHTTPRequestHandler):
         self._begin()
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path == "/healthz":                # liveness probe; no auth, no data
+            return self._json(200, {"ok": True})
         if u.path in ("/health/day", "/health/today"):
             return self._health_day(q)
         if u.path == "/health/pending":

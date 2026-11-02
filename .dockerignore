@@ -1,0 +1,23 @@
+# Secrets and runtime data must never enter an image layer.
+.env
+.env.*
+!.env.example
+data/
+tls/
+*.key
+*.pem
+*.crt
+*.sqlite
+*.sqlite-*
+# Repo and dev noise.
+.git
+.github
+tests/
+docs/
+deploy/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+*.png
