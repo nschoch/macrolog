@@ -28,6 +28,7 @@ jobs:
           python tests/schema_migrate_test.py
           python tests/photos_test.py
           python tests/auth_state_test.py
+          python tests/icons_test.py
       - name: API suite
         run: |
           export MACROLOG_DATA="$(mktemp -d)"
