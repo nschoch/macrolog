@@ -323,6 +323,14 @@ try:
     check("health token is scoped to its owner's meals",
           "A-only dish" in bdHA and "A-only dish" not in bdHB,
           f"A={bdHA[:80]} B={bdHB[:80]}")
+    # Regression: an iOS Shortcut may post the ack body as text/plain; the
+    # endpoint is Bearer-authenticated, so the JSON content-type rule must not
+    # apply there.
+    st,_,bdAck = req("/health/ack", method="POST",
+                     headers={"Authorization":"Bearer "+tokenA,
+                              "Content-Type":"text/plain"},
+                     body={"dates":[time.strftime("%Y-%m-%d")]})
+    check("health ack accepts a text/plain body", st == 200, f"{st} {bdAck[:80]}")
     req("/api/health/token", method="DELETE",
         headers={"Cookie":"macrolog_session="+ck_a})
     req("/api/health/token", method="DELETE",

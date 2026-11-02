@@ -2245,7 +2245,7 @@ class Handler(BaseHTTPRequestHandler):
                    if h}
         return (o.netloc or "").lower() not in allowed
 
-    def _read_body(self, multipart_ok=False):
+    def _read_body(self, multipart_ok=False, any_json_type=False):
         self._upload = None
         self._uploads = []
         raw_len = (self.headers.get("Content-Length") or "0").strip()
@@ -2267,7 +2267,7 @@ class Handler(BaseHTTPRequestHandler):
             return {}, None
         # Only JSON. A text/plain or form-encoded body is what a cross-site
         # <form> or no-cors fetch can send without a CORS preflight.
-        if not ctype.startswith("application/json"):
+        if not ctype.startswith("application/json") and not any_json_type:
             return None, "Content-Type must be application/json"
         try:
             return json.loads(raw.decode()), None
@@ -2380,7 +2380,10 @@ class Handler(BaseHTTPRequestHandler):
             # Bearer token, never an ambient cookie: no CSRF exposure.
             if not self._health_token_owner():
                 return self._reject_unread(401, "invalid health token")
-            body, err = self._read_body()
+            # A Bearer token can't be sent by a cross-site form, so there is no
+            # CSRF to defend against here: accept JSON whatever the Content-Type
+            # an iOS Shortcut happens to send.
+            body, err = self._read_body(any_json_type=True)
             if err:
                 return self._reject_unread(400, err)
             return self._health_ack(body or {})
@@ -2765,7 +2768,9 @@ def main():
         # a reachable interface by accident.
         sys.exit(f"refusing to listen on {args.host} without login: configure "
                  "OIDC (see .env.example) or set MACROLOG_ALLOW_NO_AUTH=1 to "
-                 "accept a shared no-auth instance on a trusted network.")
+                 "accept a shared no-auth instance on a trusted network. "
+                 "(Docker: an existing container without OIDC needs "
+                 "-e MACROLOG_ALLOW_NO_AUTH=1, or configure OIDC.)")
     if args.maintain_photos:
         maintain_photos(dry_run=args.dry_run)
         return
