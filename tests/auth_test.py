@@ -155,7 +155,7 @@ try:
     check("user B sees NO data (isolated)", b_empty, str(dB.get("intake"))[:80])
 
     # 10. PROVIDER KEYS ARE PER-USER: B must not inherit or see A's key.
-    SECRET = "sk-auth-test-DO-NOT-LEAK"
+    SECRET = "test-key-auth-do-not-leak"
     stA,_,bdA = req("/api/settings", method="PUT",
                     headers={"Cookie":"macrolog_session="+ck_a},
                     body={"providers":[{"kind":"openrouter",

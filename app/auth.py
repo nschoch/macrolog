@@ -8,7 +8,7 @@ the `cryptography` package when available, otherwise we fall back to trusting a
 TLS-protected userinfo call (documented below).
 
 Configuration comes from environment (see .env.example):
-  OIDC_ISSUER         e.g. https://auth.theschochs.com
+  OIDC_ISSUER         e.g. https://auth.example.com
   OIDC_CLIENT_ID      from Pocket ID > Administration > OIDC Clients
   OIDC_CLIENT_SECRET  same (optional; PKCE public-client if omitted)
   OIDC_REDIRECT_BASE  optional override of the externally-visible origin

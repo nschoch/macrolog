@@ -1,5 +1,7 @@
 # MacroLog
 
+[![tests](https://github.com/nschoch/macrolog/actions/workflows/tests.yml/badge.svg)](https://github.com/nschoch/macrolog/actions/workflows/tests.yml)
+
 **Self-hosted AI calorie & macro tracker. Snap a photo of your meal, get an
 estimate, correct it, and watch your targets adapt to what your body actually
 does.** No subscription. Your data is one SQLite file plus a folder of photos.
@@ -224,7 +226,9 @@ data/                runtime: sqlite + photos (gitignored — this is your backu
 Back up by copying `data/`. Photos stay on your machine; only the image bytes go
 to whichever provider you configure. Provider keys live in that same SQLite
 file (per user), are never sent back to the browser after saving, and are
-excluded from JSON exports. Nothing else leaves your network.
+excluded from JSON exports. Nothing else leaves your network. See
+[SECURITY.md](SECURITY.md) for private vulnerability reporting and deployment
+hardening.
 
 ### Photo storage
 

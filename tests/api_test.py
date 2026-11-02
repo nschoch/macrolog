@@ -180,7 +180,7 @@ check("height persists after save+reload", p.get("height_cm") == 183, str(p.get(
 check("profile-set clears needs_setup nag", s2.get("needs_setup") is False, str(s2.get("needs_setup")))
 
 # 8c. Per-user provider config: keys are write-only and survive reorder by id.
-SECRET = "sk-or-test-DO-NOT-LEAK"
+SECRET = "test-key-or-do-not-leak"
 st, pv = req("/api/settings", "PUT", {"providers": [
     {"kind": "stub"},
     {"kind": "openrouter", "model": "qwen/qwen3.8-flash",

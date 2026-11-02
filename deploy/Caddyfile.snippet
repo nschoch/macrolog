@@ -57,7 +57,7 @@ macrolog.example.com {
 # * The app speaks plain HTTP and uses only relative URLs, so no scheme/host
 #   rewriting is required. X-Forwarded-* headers are handled if you add them but
 #   the app does not depend on them.
-# * No auth is built into MacroLog (single-user design). Put Caddy's auth, a
+# * OIDC is optional. Without OIDC_ISSUER/OIDC_CLIENT_ID, put Caddy's auth, a
 #   tailnet restriction, or Netbird ACLs in front if the hostname could ever be
-#   reachable beyond your devices.
+#   reachable beyond your devices. With OIDC enabled, each account is isolated.
 # * Health check once live:  curl -sS https://macrolog.example.com/api/state | head
