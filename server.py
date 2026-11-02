@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -599,17 +600,17 @@ class Api:
                 return 400, {"error": "invalid or expired photo; retake it"}
             tmp_list.append(owned)
         tz = h._tz()
-        d = body.get("date") or today_str(tz)
-        ts = _parse_when(body, default_date=d, tz=tz)
+        d = _iso_date(body.get("date"), today_str(tz))
+        kind = _meal_kind(body.get("kind"))
+        ts = _parse_when({**body, "date": d}, default_date=d, tz=tz)
         items = _sanitize_items(body.get("items"))
-        meal = {
-            "description": str(body.get("description") or "")[:200],
-            "calories": float(body.get("calories") or 0),
-            "protein": float(body.get("protein") or 0),
-            "carbs": float(body.get("carbs") or 0),
-            "fat": float(body.get("fat") or 0),
-            "fiber": float(body.get("fiber") or 0),
-        }
+        # Negative calories keep their dedicated message below; everything else
+        # must be finite and within sane bounds.
+        meal = {"description": str(body.get("description") or "")[:200],
+                "calories": _num(body.get("calories"), "calories",
+                                 NUM_LIMITS["calories"], lo=-NUM_LIMITS["calories"])}
+        for k in ("protein", "carbs", "fat", "fiber"):
+            meal[k] = _num(body.get(k), k, NUM_LIMITS[k])
         # When components are supplied, the meal total IS their sum (single source
         # of truth); otherwise fall back to the flat totals the client sent.
         if items:
@@ -631,14 +632,15 @@ class Api:
             date=d, ts=ts,
             # "auto" = user declined to name it; grouping decides from time, so
             # persist a neutral value that won't override the derived label.
-            kind=("other" if str(body.get("kind") or "other") == "auto"
-                  else str(body.get("kind") or "other"))[:20],
+            kind=kind,
             description=meal["description"], calories=meal["calories"],
             protein=meal["protein"], carbs=meal["carbs"], fat=meal["fat"],
             fiber=meal.get("fiber") or 0,
-            confidence=float(body.get("confidence") or 0.5),
-            photo_path=final_path, source=source,
-            provider=str(body.get("provider") or "")[:30],
+            confidence=_num(body.get("confidence") if body.get("confidence") not in (None, "")
+                            else 0.5, "confidence", 1.0),
+            photo_path=final_path, source=str(source or "photo")[:20],
+            provider=(str(body.get("provider") or "").lower()
+                      if str(body.get("provider") or "").lower() in PROVIDER_KINDS else ""),
             model=str(body.get("model") or "")[:60],
             raw_json=json.dumps(body.get("raw") or {})[:8000], owner=owner)
         if items:
@@ -695,9 +697,16 @@ class Api:
             return 404, {"error": "meal not found"}
         # Components supplied -> replace them and derive totals from the sum.
         items = _sanitize_items(body.get("items")) if "items" in body else None
-        fields = {k: v for k, v in body.items()
-                  if k in ("kind", "description", "calories", "protein",
-                           "carbs", "fat", "fiber")}
+        fields = {}
+        if "kind" in body:
+            fields["kind"] = _meal_kind(body["kind"])
+        if "description" in body:
+            fields["description"] = str(body.get("description") or "")[:200]
+        for k in ("calories", "protein", "carbs", "fat", "fiber"):
+            if k in body:
+                fields[k] = _num(body[k], k, NUM_LIMITS[k])
+        if "date" in body and body.get("date"):
+            body = {**body, "date": _iso_date(body["date"])}
         new_date = old["date"]
         if items is not None:
             summed = _sum_items(items)
@@ -744,19 +753,19 @@ class Api:
     @staticmethod
     def POST_weight(h, q, body):
         owner = getattr(h, "owner", "default")
-        raw = float(body.get("value") or 0)
+        raw = _num(body.get("value"), "weight", 2000)
         # Trust the unit the CLIENT declared for this value; fall back to the
         # stored preference only if it omitted one. Never guess silently.
         unit = str(body.get("unit") or get_settings(owner).get("units", "metric")).lower()
         val = raw / LB_PER_KG if unit in ("lb", "imperial", "lbs") else raw
         if val <= 0 or val > 700:      # validated in canonical kg
             return 400, {"error": "weight out of range"}
-        d = body.get("date") or today_str(h._tz())
+        d = _iso_date(body.get("date"), today_str(h._tz()))
         db.set_weight(d, local_ts_for(d, tz=h._tz()), round(val, 2), owner)
         if body.get("body_fat") is not None:
-            bf = float(body["body_fat"])
+            bf = _num(body["body_fat"], "body_fat", 100)
             if 1 <= bf <= 70:
-                db.set_body_fat(d, local_ts_for(d), bf, owner)
+                db.set_body_fat(d, local_ts_for(d, tz=h._tz()), bf, owner)
         s = get_settings(owner)
         if not s.get("start_date"):
             s["start_date"] = d
@@ -768,7 +777,7 @@ class Api:
     @staticmethod
     def GET_history(h, q, body):
         owner = getattr(h, "owner", "default")
-        days = int((q.get("days") or ["90"])[0])
+        days = max(1, min(3660, int((q.get("days") or ["90"])[0])))
         start = (now_local(h._tz()).date() - timedelta(days=days)).isoformat()
         meals = db.query(
             "SELECT date, SUM(calories) c, SUM(protein) p, SUM(carbs) cb, "
@@ -863,12 +872,12 @@ class Api:
     @staticmethod
     def POST_exercise(h, q, body):
         owner = getattr(h, "owner", "default")
-        cal = float(body.get("calories") or 0)
+        cal = _num(body.get("calories"), "calories", 10000, lo=-1e9)
         if cal <= 0:
             return 400, {"error": "calories must be > 0"}
-        d = body.get("date") or today_str()
+        d = _iso_date(body.get("date"), today_str(h._tz()))
         db.execute("INSERT INTO exercises(owner,ts,date,name,calories) VALUES(?,?,?,?,?)",
-                   (owner, local_ts_for(d), d, str(body.get("name") or "workout")[:60], cal))
+                   (owner, local_ts_for(d, tz=h._tz()), d, str(body.get("name") or "workout")[:60], cal))
         return 201, _day_summary(d, owner)
 
     @staticmethod
@@ -1394,23 +1403,72 @@ def _genericize_estimate(meal: dict) -> dict:
     return meal
 
 
+# ------------------------------------------------------------ input checks
+# Python's json accepts NaN/Infinity, and one stored Infinity or malformed date
+# used to break /api/state for that day (or every day) until hand-fixed in SQL.
+MEAL_KINDS = ("breakfast", "lunch", "dinner", "snack", "drink", "other")
+NUM_LIMITS = {"calories": 20000, "protein": 2000, "carbs": 2000, "fat": 2000,
+              "fiber": 500, "grams": 20000}
+
+
+def _num(v, name: str, hi: float, lo: float = 0.0, clamp_low: bool = False) -> float:
+    """Finite float in [lo, hi]; '' / None mean 0. Raises ValueError (-> 400)."""
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise ValueError(f"{name} must be a number")
+    try:
+        x = float(v)
+    except ValueError:
+        raise ValueError(f"{name} must be a number") from None
+    if not math.isfinite(x):
+        raise ValueError(f"{name} must be a finite number")
+    if clamp_low and x < lo:
+        x = lo
+    if x < lo or x > hi:
+        raise ValueError(f"{name} must be between {lo:g} and {hi:g}")
+    return x
+
+
+def _iso_date(v, default: str | None = None) -> str:
+    """Canonical YYYY-MM-DD, or ValueError. Rejects '2026-1-5', '<script>', etc."""
+    if v in (None, ""):
+        if default is None:
+            raise ValueError("date is required")
+        return default
+    try:
+        d = date.fromisoformat(str(v))
+    except ValueError:
+        raise ValueError("invalid date (use YYYY-MM-DD)") from None
+    if not (date(2000, 1, 1) <= d <= date(2100, 1, 1)):
+        raise ValueError("date out of range")
+    return d.isoformat()
+
+
+def _meal_kind(v) -> str:
+    k = str(v or "other").strip().lower()
+    if k in ("", "auto"):
+        return "other"
+    if k not in MEAL_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(MEAL_KINDS)}")
+    return k
+
+
 def _sanitize_items(raw) -> list[dict]:
     """Coerce client-supplied components into safe rows (name + grams + macros)."""
+    if raw is not None and not isinstance(raw, list):
+        raise ValueError("items must be a list")
     out = []
     for it in (raw or [])[:40]:
         if not isinstance(it, dict):
             continue
         name = str(it.get("name") or "").strip()[:120]
-        g = max(0.0, float(it.get("grams") or 0))
-        cal = max(0.0, float(it.get("calories") or 0))
-        if not name and g == 0 and cal == 0:
+        nums = {k: _num(it.get(k), f"item {k}", NUM_LIMITS[k], clamp_low=True)
+                for k in ("grams", "calories", "protein", "carbs", "fat", "fiber")}
+        if not name and nums["grams"] == 0 and nums["calories"] == 0:
             continue
         out.append({"name": name, "detail": str(it.get("detail") or "").strip()[:120],
-                    "grams": g, "calories": cal,
-                    "protein": max(0.0, float(it.get("protein") or 0)),
-                    "carbs": max(0.0, float(it.get("carbs") or 0)),
-                    "fat": max(0.0, float(it.get("fat") or 0)),
-                    "fiber": max(0.0, float(it.get("fiber") or 0))})
+                    **nums})
     return out
 
 
@@ -2019,6 +2077,25 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "MacroLog/1.0"
     protocol_version = "HTTP/1.1"
 
+    # Sent on every response. script-src 'self' is the real XSS backstop (the
+    # app has no inline scripts or on* handlers); inline style attributes are
+    # still generated by the UI, hence 'unsafe-inline' for styles only.
+    SECURITY_HEADERS = (
+        ("Content-Security-Policy",
+         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+         "img-src 'self' data: blob:; connect-src 'self'; worker-src 'self'; "
+         "manifest-src 'self'; object-src 'none'; base-uri 'none'; "
+         "form-action 'self'; frame-ancestors 'none'"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "same-origin"),
+    )
+
+    def end_headers(self):
+        for k, v in self.SECURITY_HEADERS:
+            self.send_header(k, v)
+        super().end_headers()
+
     def log_message(self, fmt, *args):
         with _LOG_LOCK:
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
@@ -2286,9 +2363,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/auth/login":
             if not OIDC.enabled():
                 return self._redirect("/")
-            nxt = (q.get("next") or ["/"])[0]
-            if not nxt.startswith("/"):        # only allow same-origin paths
-                nxt = "/"
+            nxt = _local_path((q.get("next") or ["/"])[0])
             url, meta = OIDC.build_login_url(base, redirect_after=nxt)
             self._set_cookie(STATE_COOKIE, meta["state"], max_age=600)
             return self._redirect(url)
@@ -2304,12 +2379,15 @@ class Handler(BaseHTTPRequestHandler):
             self._set_cookie(SESSION_COOKIE, OIDC.make_session_cookie(user),
                              max_age=7 * 86400)
             self._set_cookie(STATE_COOKIE, "", max_age=0)   # clear state cookie
-            return self._redirect(after if str(after).startswith("/") else "/")
+            return self._redirect(_local_path(after))
         if path == "/auth/logout":
             self._set_cookie(SESSION_COOKIE, "", max_age=0)
             body = b'<html><body style="font-family:sans-serif;background:#0f1115;color:#e8eaf0;text-align:center;padding-top:20vh">Signed out.<p><a href="/auth/login" style="color:#4ade80">Log back in</a></p></body></html>'
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # Drop cached shell/API responses and photos on shared devices.
+            self.send_header("Clear-Site-Data", '"cache"')
+            self.send_header("Cache-Control", "no-store")
             for c in self._pending_cookies:
                 self.send_header("Set-Cookie", c)
             self.send_header("Content-Length", str(len(body)))
@@ -2489,7 +2567,6 @@ class Handler(BaseHTTPRequestHandler):
         # Revalidate every time: a shared device must not keep showing photos
         # from the HTTP cache after logout.
         self.send_header("Cache-Control", "private, no-cache")
-        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -2551,6 +2628,20 @@ def lan_ips():
     except OSError:
         pass
     return ips
+
+
+def _local_path(target) -> str:
+    """Same-origin path for post-login redirects, else '/'.
+
+    '//evil.com' and '/\\evil.com' start with '/' yet browsers treat them as
+    another host, which made /auth/login?next= an open redirect.
+    """
+    t = str(target or "/")
+    if not t.startswith("/") or t.startswith(("//", "/\\")) or \
+            any(ord(c) < 32 for c in t):
+        return "/"
+    u = urlparse(t)
+    return "/" if (u.scheme or u.netloc) else t
 
 
 def _is_loopback_host(host: str) -> bool:

@@ -106,6 +106,23 @@ try:
     check("session cookie issued", bool(sess))
     cookie_val = sess.group(1) if sess else ""
 
+    # Regression (audit M4): ?next=//host must not become an open redirect.
+    for evil in ("//evil.example/x", "/\\evil.example"):
+        st, hd, _ = req("/auth/login?next=" + urllib.parse.quote(evil, safe=""))
+        q2 = urllib.parse.urlparse(hd.get("Location", "")).query
+        try:
+            urllib.request.build_opener(NR).open(
+                urllib.request.Request(ISSUER + "/authorize?" + q2), timeout=10)
+            r2 = ""
+        except urllib.error.HTTPError as e:
+            r2 = e.headers.get("Location", "")
+        p2 = urllib.parse.parse_qs(urllib.parse.urlparse(r2).query)
+        c2, s2 = p2.get("code", [""])[0], p2.get("state", [""])[0]
+        st, hd, _ = req(f"/auth/callback?code={c2}&state={urllib.parse.quote(s2)}",
+                        headers={"Cookie": f"macrolog_oidc_state={urllib.parse.quote(s2)}"})
+        check(f"login next={evil!r} lands on '/'", st == 302 and hd.get("Location") == "/",
+              f"{st} {hd.get('Location')}")
+
     # 5. authenticated API now works and reports the user
     st, hd, bd = req("/api/state", headers={"Cookie": "macrolog_session=" + cookie_val})
     d = json.loads(bd)

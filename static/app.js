@@ -312,7 +312,7 @@ function mealRowHtml(m) {
         ${thumb}
         <div class="meal-info">
           <div class="meal-desc">${esc(m.description || m.kind || 'Meal')}</div>
-          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.kind && m.kind !== 'other' ? ' · ' + cap(m.kind) : ''}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} items` : ''}</div>
+          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.kind && m.kind !== 'other' ? ' · ' + esc(cap(m.kind)) : ''}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} items` : ''}</div>
         </div>
         <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
         <div class="meal-actions">
@@ -365,8 +365,8 @@ function renderGroups(groups, meals) {
   }).join('');
 }
 
-const esc = (s) => String(s || '').replace(/[&<>"]/g, ch =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+const esc = (s) => String(s || '').replace(/[&<>"']/g, ch =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : '';
 const iconSvg = (name) =>
   `<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
@@ -680,7 +680,7 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
     warn.hidden = !warning;
   }
 
-  $('r-prov').innerHTML = `${cap(provider || 'manual')}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
+  $('r-prov').innerHTML = `${esc(cap(provider || 'manual'))}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
 
   $('review-sheet').hidden = false;
   document.body.style.overflow = 'hidden';

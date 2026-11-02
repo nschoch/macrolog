@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import os
 import urllib.error
@@ -290,12 +291,22 @@ def normalize(data: dict) -> dict:
 
 
 def _num(v, default: float = 0.0) -> float:
+    """Model output -> finite, non-negative, sane float (else `default`).
+
+    Models occasionally emit NaN/Infinity/1e309 or negative grams; those used to
+    reach the browser as bare `NaN` (invalid JSON) or break day totals.
+    """
     try:
         if v is None:
             return default
-        return float(str(v).strip().split()[0]) if isinstance(v, str) else float(v)
+        if isinstance(v, str):
+            v = v.strip().split()[0].replace(",", "")
+        x = float(v)
     except (ValueError, IndexError, TypeError):
         return default
+    if not math.isfinite(x) or x < 0 or x > 100000:
+        return default
+    return x
 
 
 # --------------------------------------------------------------------------

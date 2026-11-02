@@ -902,6 +902,49 @@ with _socket.create_connection((_u.hostname, _u.port), timeout=10) as sk:
     first = sk.recv(200).decode(errors="replace").split("\r\n", 1)[0]
 check("negative Content-Length rejected without reading to EOF", " 400 " in first, first)
 
+# ------------------------------------- audit H4/H6: validation + headers
+st, _ = req("/api/meals", "POST", {"description": "x", "calories": 10,
+                                    "kind": "<img src=x onerror=alert(1)>"})
+check("meal kind outside the whitelist refused", st == 400, str(st))
+st, mk = req("/api/meals", "POST", {"description": "valid kind", "calories": 10,
+                                     "kind": "snack", "date": "2001-01-01"})
+check("whitelisted kind accepted", st == 201, str(mk)[:100])
+vid = mk.get("id")
+for label, raw in (("Infinity", b'{"description":"x","calories":Infinity}'),
+                   ("NaN", b'{"description":"x","calories":NaN}'),
+                   ("1e309", b'{"description":"x","calories":1e309}'),
+                   ("string", b'{"description":"x","calories":"abc"}'),
+                   ("negative macro", b'{"description":"x","calories":5,"fat":-1e9}'),
+                   ("bad item", b'{"description":"x","items":[{"name":"a","calories":Infinity}]}'),
+                   ("non-ISO date", b'{"description":"x","calories":5,"date":"2026-1-5"}')):
+    st, _ = req("/api/meals", "POST", raw_body=raw)
+    check(f"meal with {label} refused", st == 400, str(st))
+st, _ = req(f"/api/meals/{vid}", "PATCH", {"calories": "abc"})
+st2, day = req("/api/state?date=2001-01-01")
+kept = [m for m in day.get("meals", []) if m.get("id") == vid]
+check("PATCH with a bad number is refused without a partial write",
+      st == 400 and st2 == 200 and kept and kept[0].get("calories") == 10, f"{st} {st2}")
+st, _ = req(f"/api/meals/{vid}", "PATCH", {"kind": "<svg onload=alert(1)>"})
+check("PATCH kind outside the whitelist refused", st == 400, str(st))
+st, _ = req("/api/weight", "POST", {"value": 80, "unit": "kg", "date": "zzzz"})
+st2, _ = req("/api/state")
+check("weight with a junk date refused and state still loads", st == 400 and st2 == 200,
+      f"{st} {st2}")
+st, _ = req("/api/exercise", "POST", raw_body=b'{"calories":Infinity}')
+check("exercise with Infinity refused", st == 400, str(st))
+st, _ = req("/api/history?days=99999999")
+check("huge history window is clamped, not a 500", st == 200, str(st))
+
+with urllib.request.urlopen(BASE + "/", timeout=10) as r:
+    csp = r.headers.get("Content-Security-Policy", "")
+    xcto = r.headers.get("X-Content-Type-Options")
+    fo = r.headers.get("X-Frame-Options")
+check("HTML carries a script-src 'self' CSP", "script-src 'self'" in csp
+      and "frame-ancestors 'none'" in csp, csp)
+check("HTML carries nosniff + DENY framing", xcto == "nosniff" and fo == "DENY", f"{xcto} {fo}")
+with urllib.request.urlopen(BASE + "/api/state", timeout=10) as r:
+    check("API responses carry nosniff", r.headers.get("X-Content-Type-Options") == "nosniff")
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))
