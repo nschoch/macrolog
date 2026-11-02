@@ -5,12 +5,15 @@ backed up by copying one file plus the photos directory.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import threading
 import time
 
-_WRITE_LOCK = threading.Lock()
+# Serializes writers in this process (SQLite allows one writer at a time anyway).
+# Re-entrant so a transaction() block can call execute() inside it.
+_WRITE_LOCK = threading.RLock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -125,14 +128,45 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        # One connection PER THREAD. A single connection shared by the threaded
+        # HTTP server raised "InterfaceError: bad parameter or other API misuse"
+        # under concurrent reads; per-thread connections + WAL let readers run
+        # in parallel with the (locked) writer.
+        self._local = threading.local()
         with _WRITE_LOCK:
             self._conn.executescript(SCHEMA)
             self._migrate()
             self._conn.commit()
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, timeout=15)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=15000")
+            self._local.conn = conn
+            self._local.depth = 0
+        return conn
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Group several writes into one atomic commit (rolled back on error)."""
+        with _WRITE_LOCK:
+            conn = self._conn
+            self._local.depth += 1
+            try:
+                yield
+            except BaseException:
+                self._local.depth -= 1
+                if self._local.depth == 0:
+                    conn.rollback()
+                raise
+            self._local.depth -= 1
+            if self._local.depth == 0:
+                conn.commit()
 
     def _migrate(self):
         """Idempotent upgrades for databases created before per-user scoping.
@@ -225,15 +259,12 @@ class Database:
         return self._conn.execute(sql, params).fetchone()
 
     def execute(self, sql: str, params: tuple = ()):
-        with _WRITE_LOCK:
-            cur = self._conn.execute(sql, params)
-            self._conn.commit()
-            return cur.lastrowid
+        with self.transaction():
+            return self._conn.execute(sql, params).lastrowid
 
     def executemany(self, sql: str, seq):
-        with _WRITE_LOCK:
+        with self.transaction():
             self._conn.executemany(sql, seq)
-            self._conn.commit()
 
     # -- settings --------------------------------------------------------
     def get_setting(self, key: str, default=None):
@@ -282,10 +313,11 @@ class Database:
         return self.one("SELECT * FROM meals WHERE id=? AND owner=?", (meal_id, owner))
 
     def delete_meal(self, meal_id: int, owner: str = "default") -> sqlite3.Row | None:
-        row = self.get_meal(meal_id, owner)
-        if row:
-            self.execute("DELETE FROM estimates WHERE meal_id=?", (meal_id,))
-            self.execute("DELETE FROM meals WHERE id=? AND owner=?", (meal_id, owner))
+        with self.transaction():
+            row = self.get_meal(meal_id, owner)
+            if row:
+                self.execute("DELETE FROM estimates WHERE meal_id=?", (meal_id,))
+                self.execute("DELETE FROM meals WHERE id=? AND owner=?", (meal_id, owner))
         return row
 
     def meals_for_date(self, date: str, owner: str = "default") -> list[sqlite3.Row]:
@@ -300,7 +332,6 @@ class Database:
         them onto the meals row too. Totals are ALWAYS the sum of items when any
         items exist, keeping meal.total == SUM(components) as an invariant.
         """
-        self.execute("DELETE FROM meal_items WHERE meal_id=?", (meal_id,))
         rows = []
         tot = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "fiber": 0.0}
         for i, it in enumerate(items):
@@ -316,10 +347,12 @@ class Database:
                          str(it.get("detail") or "")[:120], g, cal, p, c, f, fb))
             tot["calories"] += cal; tot["protein"] += p
             tot["carbs"] += c; tot["fat"] += f; tot["fiber"] += fb
-        if rows:
-            self.executemany(
-                "INSERT INTO meal_items(meal_id,ord,name,detail,grams,calories,protein,"
-                "carbs,fat,fiber) VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
+        with self.transaction():               # never leave a meal half-replaced
+            self.execute("DELETE FROM meal_items WHERE meal_id=?", (meal_id,))
+            if rows:
+                self.executemany(
+                    "INSERT INTO meal_items(meal_id,ord,name,detail,grams,calories,protein,"
+                    "carbs,fat,fiber) VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
         return {k: round(v, 1) for k, v in tot.items()}
 
     def items_for_meal(self, meal_id: int) -> list[dict]:
@@ -356,4 +389,7 @@ class Database:
             (owner, ts, date, value))
 
     def close(self):
-        self._conn.close()
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None

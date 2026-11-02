@@ -59,7 +59,8 @@ if __name__ == "__main__":
 
 from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           calibration_multipliers, macronutrient_targets,
-                          record_correction, tdee_from_formula, weight_trend)
+                          record_correction, tdee_from_formula, weight_trend,
+                          bmr_from_formula)
 from app.database import Database
 from app.vision import (PROVIDER_KINDS, ProviderError, estimate_meal,
                         estimate_photo, estimate_text, provider_default_base,
@@ -274,12 +275,53 @@ def get_settings(owner: str = "default") -> dict:
     return merged
 
 
+# Written only by the server (token endpoints, adaptation, first weigh-in).
+SERVER_MANAGED_KEYS = {"health_token_hash", "health_token_created_at",
+                       "target_adjusted_on"}
+TARGET_MIN_KCAL, TARGET_MAX_KCAL = 800, 10000
+# key -> (lo, hi); values are clamped into range, non-numbers are a 400.
+_NUMERIC_SETTINGS = {
+    "age": (14, 100), "height_cm": (100, 250), "activity_factor": (1.0, 2.5),
+    "weekly_rate_kg": (-1.5, 1.0), "protein_g_per_kg": (0.5, 4.0),
+    "fat_calorie_pct": (0.1, 0.6), "meal_gap_minutes": (5, 600),
+    "calorie_target": (TARGET_MIN_KCAL, TARGET_MAX_KCAL),
+    "starting_weight_kg": (20, 700),
+}
+
+
+def _clean_numeric_settings(personal: dict) -> None:
+    for key, (lo, hi) in _NUMERIC_SETTINGS.items():
+        if key not in personal:
+            continue
+        v = personal[key]
+        if v is None or v == "":
+            if key in ("calorie_target", "starting_weight_kg"):
+                personal[key] = None          # "unset" is meaningful here
+                continue
+            personal.pop(key)
+            continue
+        x = _num(v, key, float("inf"), lo=float("-inf"))
+        personal[key] = min(hi, max(lo, x))
+    for key in ("calorie_target_locked", "auto_adapt", "calibrate_estimates"):
+        if key in personal and not isinstance(personal[key], bool):
+            raise ValueError(f"{key} must be true or false")
+    for key, allowed in (("units", ("metric", "imperial")), ("sex", ("male", "female")),
+                         ("time_format", ("12h", "24h"))):
+        if key in personal and personal[key] not in allowed:
+            raise ValueError(f"{key} must be one of {', '.join(allowed)}")
+    if "start_date" in personal and personal["start_date"]:
+        personal["start_date"] = _iso_date(personal["start_date"])
+
+
 def save_user_settings(owner: str, updates: dict) -> None:
-    cur = db.get_setting(f"settings:{owner}", {}) or {}
-    for k, v in updates.items():
-        if k in USER_SETTING_KEYS:
-            cur[k] = v
-    db.set_setting(f"settings:{owner}", cur)
+    # Read-modify-write under one transaction so two concurrent saves (e.g.
+    # the units toggle and a provider edit) can't drop each other's changes.
+    with db.transaction():
+        cur = db.get_setting(f"settings:{owner}", {}) or {}
+        for k, v in updates.items():
+            if k in USER_SETTING_KEYS:
+                cur[k] = v
+        db.set_setting(f"settings:{owner}", cur)
 
 
 # The app is single-household and its users live in one timezone, but the LXC
@@ -906,7 +948,9 @@ class Api:
         # write the signed-in user's own blob. Provider entries are sanitized so
         # a client cannot inject arbitrary keys or non-http URLs.
         current = get_settings(owner)
-        personal = {k: v for k, v in body.items() if k in USER_SETTING_KEYS}
+        personal = {k: v for k, v in body.items()
+                    if k in USER_SETTING_KEYS and k not in SERVER_MANAGED_KEYS}
+        _clean_numeric_settings(personal)
         if "photo_retention_months" in personal:
             try:
                 personal["photo_retention_months"] = max(
@@ -919,10 +963,14 @@ class Api:
         if personal.get("calorie_target_locked") is True:
             # A lock is a freeze: auto-adapt must not remain enabled in the UI.
             personal["auto_adapt"] = False
-            if "calorie_target" not in personal:
-                rate = float(current.get("weekly_rate_kg") or 0.0)
-                personal["calorie_target"] = round(
-                    tdee_from_formula(current) + rate * 7700.0 / 7.0)
+            if personal.get("calorie_target") is None:
+                # Use the settings as they will be AFTER this save, and never
+                # lock below BMR (a -5 kg/week rate used to lock -3061 kcal).
+                merged = {**current, **personal}
+                rate = float(merged.get("weekly_rate_kg") or 0.0)
+                proposed = tdee_from_formula(merged) + rate * 7700.0 / 7.0
+                personal["calorie_target"] = int(round(max(
+                    bmr_from_formula(merged), min(proposed, TARGET_MAX_KCAL))))
         # Saving any body/goal field marks the profile as configured (clears nag).
         if personal.get("units") or personal.get("age") or personal.get("height_cm") \
                 or personal.get("sex") or personal.get("activity_factor"):
@@ -2074,6 +2122,10 @@ MAX_BODY = 20 * 1024 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Idle/slow clients (slowloris, a phone that lost signal mid-upload) used to
+    # hold a thread forever. This is per socket operation, so a slow but
+    # progressing photo upload is unaffected.
+    timeout = 30
     server_version = "MacroLog/1.0"
     protocol_version = "HTTP/1.1"
 
@@ -2646,6 +2698,36 @@ def _local_path(target) -> str:
     return "/" if (u.scheme or u.netloc) else t
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on concurrent connections.
+
+    Past the cap, new connections are closed immediately instead of each
+    spawning a thread. A homelab app never needs anywhere near this many.
+    """
+    daemon_threads = True
+    max_connections = int(os.environ.get("MACROLOG_MAX_CONNECTIONS", "64"))
+
+    def __init__(self, *a, **k):
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(*a, **k)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def _is_loopback_host(host: str) -> bool:
     if host in ("localhost", ""):
         return host == "localhost"
@@ -2691,8 +2773,7 @@ def main():
     sweep_photos(verbose=True)
     threading.Thread(target=_photo_maintenance_loop, daemon=True).start()
 
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    httpd.daemon_threads = True
+    httpd = BoundedThreadingHTTPServer((args.host, args.port), Handler)
 
     use_tls = bool(args.tls_cert and args.tls_key)
     if use_tls:
@@ -2703,7 +2784,10 @@ def main():
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         except (AttributeError, ValueError):
             pass
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        # Handshake lazily in the worker thread: with the default eager
+        # handshake, one stalled client blocked accept() for everyone.
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True,
+                                       do_handshake_on_connect=False)
     elif args.tls_cert or args.tls_key:
         print("  ! both --tls-cert and --tls-key are required for HTTPS; running plain HTTP")
 

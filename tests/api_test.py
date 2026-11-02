@@ -945,6 +945,25 @@ check("HTML carries nosniff + DENY framing", xcto == "nosniff" and fo == "DENY",
 with urllib.request.urlopen(BASE + "/api/state", timeout=10) as r:
     check("API responses carry nosniff", r.headers.get("X-Content-Type-Options") == "nosniff")
 
+# ------------------------------------------- audit M7: settings validation
+st, before = req("/api/settings")
+st, r = req("/api/settings", "PUT", {"weekly_rate_kg": -5, "calorie_target_locked": True,
+                                       "calorie_target": None})
+tgt = (r.get("settings") or {}).get("calorie_target")
+check("locking with an extreme rate never locks below BMR", st == 200
+      and isinstance(tgt, (int, float)) and tgt >= 800, f"{st} {tgt}")
+check("weekly rate is clamped to the UI range",
+      (r.get("settings") or {}).get("weekly_rate_kg") == -1.5, str(r.get("settings"))[:120])
+st, _ = req("/api/settings", "PUT", raw_body=b'{"age": NaN}')
+check("non-finite numeric setting refused", st == 400, str(st))
+st, _ = req("/api/settings", "PUT", {"units": "<b>x</b>"})
+check("unknown units value refused", st == 400, str(st))
+st, r = req("/api/settings", "PUT", {"health_token_hash": "f" * 64})
+check("client cannot write the health token hash",
+      st == 200 and not (r.get("settings") or {}).get("health_token_hash"), str(st))
+req("/api/settings", "PUT", {"calorie_target_locked": False, "calorie_target": None,
+                             "weekly_rate_kg": -0.5})
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("failures:", ", ".join(FAIL))
