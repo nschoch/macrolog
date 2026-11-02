@@ -1,8 +1,9 @@
 # Security policy
 
 MacroLog stores personal food and weight logs, AI provider keys, and an Apple
-Health token in a local SQLite file. It can be self-hosted on a home network or
-exposed publicly, so please report security issues privately.
+Health token in a local SQLite file. It is **vibe-coded and homelab-first**:
+public internet exposure is not supported or audited. Please report security
+issues privately all the same.
 
 ## Reporting a vulnerability
 

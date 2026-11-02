@@ -1,5 +1,9 @@
 # Caddy reverse proxy for MacroLog
 # ================================
+# MacroLog is homelab-first: point this at a LAN, VPN, or tailnet hostname.
+# Public internet exposure is not supported; if you do it anyway, put OIDC and
+# a firewall in front and understand that this project is not security-audited.
+#
 # You said Caddy already handles HTTPS on your network, so this file just maps
 # your chosen hostname -> the MacroLog app server. Copy the relevant block into
 # your existing Caddyfile (usually /etc/caddy/Caddyfile) and `caddy reload`.

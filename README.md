@@ -2,9 +2,18 @@
 
 [![tests](https://github.com/nschoch/macrolog/actions/workflows/tests.yml/badge.svg)](https://github.com/nschoch/macrolog/actions/workflows/tests.yml)
 
-**Self-hosted AI calorie & macro tracker. Snap a photo of your meal, get an
-estimate, correct it, and watch your targets adapt to what your body actually
-does.** No subscription. Your data is one SQLite file plus a folder of photos.
+**Self-hosted, homelab-first AI calorie & macro tracker. Snap a photo of your
+meal, get an estimate, correct it, and watch your targets adapt to what your
+body actually does.** No subscription. Your data is one SQLite file plus a
+folder of photos.
+
+> **Vibe-coded, homelab-first.** This project was built largely with AI
+> assistance and has not been security-audited. It is intended for a trusted
+> local network, VPN, or tailnet — **not for public internet exposure**. OIDC
+> and HTTPS are available for multi-user and defense-in-depth setups, but they
+> do not make public exposure supported. If you expose it anyway, you do so at
+> your own risk. Treat it as a hobby project: review the code, keep backups,
+> and expect rough edges.
 
 It exists because the apps that do photo logging well (MacroFactor, Cal AI,
 SnapCalorie) charge $5–12/month, and the open-source ones that exist only do
