@@ -302,7 +302,8 @@ function mealRowHtml(m) {
     const comps = (m.items || []);
     const compHtml = comps.length ? `
       <ul class="comp-list">${comps.map(c =>
-        `<li><span class="c-name">${esc(c.name || 'item')}</span><span class="c-g">${fmt(c.grams)}g</span><span class="c-k">${fmt(c.calories)}</span></li>`
+        `<li><span class="c-name">${esc(c.name || 'item')}${c.detail
+          ? `<span class="c-detail">${esc(c.detail)}</span>` : ''}</span><span class="c-g">${fmt(c.grams)}g</span><span class="c-k">${fmt(c.calories)}</span></li>`
       ).join('')}</ul>` : '';
   return `<li class="meal ${comps.length ? 'has-comps' : ''}" data-id="${m.id}">
       <div class="meal-row" data-toggle="${m.id}">
@@ -575,13 +576,22 @@ function renderCompEditor() {
     return `
     <div class="item-row" data-i="${idx}">
       <div class="ir-top">
-        <input class="ir-name" value="${esc(it.name)}" placeholder="food" data-f="name">
+        <label class="ir-desc">
+          <span class="ir-lab">General description</span>
+          <input class="ir-name" value="${esc(it.name)}"
+            placeholder="e.g. Greek yogurt" data-f="name">
+        </label>
         <button class="ir-mode ${manual ? 'on' : ''}" data-mode="${idx}"
           title="${manual ? 'Macros are yours to edit; grams does not rescale them'
                           : 'Macros are calculated from grams — tap to edit them yourself'}">
           ${manual ? 'manual' : 'auto'}</button>
         <button class="ir-del" title="Remove" data-del="${idx}">×</button>
       </div>
+      <label class="ir-desc ir-desc-specific">
+        <span class="ir-lab">Specific description</span>
+        <input class="ir-detail" value="${esc(it.detail || '')}"
+          placeholder="brand, fat level, notes" data-f="detail">
+      </label>
       <div class="ir-fields">
         ${field(weightKnown || manual ? 'Grams' : 'Grams *', 'grams', 'g',
                  { raw: +it.grams || '' })}
@@ -680,6 +690,7 @@ $('r-items').addEventListener('input', (ev) => {
   const idx = +row.dataset.i, f = ev.target.dataset.f, raw = ev.target.value;
   const it = compItems[idx]; if (!it) return;
   if (f === 'name') { it.name = raw; return; }
+  if (f === 'detail') { it.detail = raw; return; }
   const val = Number(raw) || 0;
   if (f === 'fiber') {
     // Fiber is editable even in auto mode: the estimator sometimes omits it and
@@ -820,6 +831,67 @@ function closeSheets() {
 $('btn-cancel-review').addEventListener('click', closeSheets);
 $('review-sheet').addEventListener('click', (e) => { if (e.target.id === 'review-sheet') closeSheets(); });
 
+// The grab handle is a standard bottom-sheet affordance, so it must actually
+// work: drag down (past ~80px) or tap it to dismiss. Cancel buttons stay for
+// keyboard/accessibility and for the provider form where a stray gesture
+// would discard typed credentials.
+const SHEET_CLOSERS = {
+  'provider-sheet': () => closeProviderSheet(),
+  'add-sheet': () => { clearStaged(); closeSheets(); },
+  'review-sheet': () => closeSheets(),
+  'manual-sheet': () => closeSheets(),
+  'health-guide-sheet': () => closeSheets(),
+};
+let grabDrag = null;
+
+function resetSheetMotion(sheet) {
+  sheet.style.transition = '';
+  sheet.style.transform = '';
+}
+
+document.querySelectorAll('.sheet-grab').forEach((grab) => {
+  grab.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const sheet = grab.closest('.sheet');
+    const backdrop = grab.closest('.sheet-backdrop');
+    if (!sheet || !backdrop) return;
+    grabDrag = { sheet, backdrop, startY: e.clientY, dy: 0,
+                 moved: false, pointerId: e.pointerId };
+    sheet.style.transition = 'none';
+    grab.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+  });
+  grab.addEventListener('pointermove', (e) => {
+    if (!grabDrag || e.pointerId !== grabDrag.pointerId) return;
+    const dy = Math.max(0, e.clientY - grabDrag.startY);
+    if (Math.abs(e.clientY - grabDrag.startY) > 4) grabDrag.moved = true;
+    grabDrag.dy = dy;
+    grabDrag.sheet.style.transform = `translateY(${dy}px)`;
+  });
+  const finish = (e) => {
+    if (!grabDrag || (e.pointerId != null && e.pointerId !== grabDrag.pointerId)) return;
+    const { sheet, backdrop, dy, moved } = grabDrag;
+    grabDrag = null;
+    if (dy > 80 || !moved) {
+      // Tap or a committed swipe: slide out, then run the sheet's own closer so
+      // drafts/photo state are cleaned up exactly like the Cancel button does.
+      sheet.style.transition = 'transform .18s ease';
+      sheet.style.transform = 'translateY(100%)';
+      const id = backdrop.id;
+      setTimeout(() => {
+        (SHEET_CLOSERS[id] || closeSheets)();
+        resetSheetMotion(sheet);
+      }, 170);
+    } else {
+      sheet.style.transition = 'transform .2s ease';
+      sheet.style.transform = '';
+      setTimeout(() => { sheet.style.transition = ''; }, 220);
+    }
+  };
+  grab.addEventListener('pointerup', finish);
+  grab.addEventListener('pointercancel', finish);
+});
+
 $('btn-save-review').addEventListener('click', async () => {
   const hasComps = compItems.length > 0;
   const cleanComps = compItems
@@ -935,11 +1007,16 @@ async function loadQuickFoods() {
   const wrap = $('quick-wrap'), host = $('quick-chips');
   if (!wrap || !host) return;
   try {
-    const data = await api('quick-foods?limit=10');
+    const data = await api('quick-foods?limit=12');
     quickFoods = data.foods || [];
-    host.innerHTML = quickFoods.map((f, i) => `
-      <button class="chip" data-qf="${i}">${esc(f.name)}<small>${fmt(f.calories)} kcal</small></button>`
-    ).join('');
+    host.innerHTML = quickFoods.map((f, i) => {
+      // Name is the generic food; the brand/weight detail is the second line in
+      // review. Uses are shown so frequency ranking is visible, not magic.
+      const uses = +(f.uses || 0);
+      const tip = f.detail ? `${f.detail} · logged ${uses}×` : `Logged ${uses}×`;
+      return `<button class="chip" data-qf="${i}" title="${esc(tip)}">${esc(f.name)}`
+        + `<small>${fmt(f.calories)} kcal${uses > 1 ? ` · ×${uses}` : ''}</small></button>`;
+    }).join('');
     wrap.hidden = quickFoods.length === 0;
   } catch (_) {
     wrap.hidden = true;      // a failed lookup must never block manual logging
@@ -951,8 +1028,9 @@ $('quick-chips').addEventListener('click', (e) => {
   if (!b) return;
   const f = quickFoods[+b.dataset.qf];
   if (!f) return;
-  const item = { name: f.name, grams: f.grams, calories: f.calories,
-                 protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber };
+  const item = { name: f.name, detail: f.detail || '', grams: f.grams,
+                 calories: f.calories, protein: f.protein, carbs: f.carbs,
+                 fat: f.fat, fiber: f.fiber };
   clearStaged();
   stagedForSave = [];
   $('add-sheet').hidden = true;

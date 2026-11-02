@@ -76,6 +76,12 @@ check("estimate 200", st == 200, str(e)[:120])
 est = e.get("estimate", {})
 check("estimate has calories>0", est.get("calories", 0) > 0, str(est))
 check("estimate temp_photo present", bool(e.get("temp_photo")))
+check("estimate items use generic names (no weights/parentheses)",
+      est.get("items") and all(
+          not any(ch.isdigit() for ch in i.get("name", "")) and "(" not in i.get("name", "")
+          for i in est["items"]), str(est.get("items"))[:160])
+check("estimate items carry a detail field",
+      all("detail" in i for i in est.get("items", [])), str(est.get("items"))[:160])
 temp_path = e.get("temp_photo")
 
 # 3. save meal
@@ -662,24 +668,69 @@ check("negative calories rejected with its own message",
 for zid in (z1.get("id"), z2.get("id")):
     if zid: req(f"/api/meals/{zid}", "DELETE")
 
-# 31. Quick foods: most-logged components, with their latest macros.
+# 31. Quick foods: names fold to the generic food, then rank by frequency.
 for _ in range(3):
     req("/api/meals", "POST", {"description": "Sunfiber", "calories": 0, "source": "manual",
         "items": [{"name": "Sunfiber", "grams": 7, "calories": 0, "protein": 0,
                    "carbs": 7, "fat": 0, "fiber": 7}]})
-req("/api/meals", "POST", {"description": "Oats", "calories": 150, "protein": 5,
-    "carbs": 27, "fat": 3, "fiber": 4, "source": "manual",
-    "items": [{"name": "Oats", "grams": 40, "calories": 150, "protein": 5,
-               "carbs": 27, "fat": 3, "fiber": 4}]})
-st, qf = req("/api/quick-foods?limit=10")
+# The same yogurt scanned with a different brand wording / weight each day.
+yogurt_variants = [
+    ("Chobani Nonfat Plain Greek Yogurt (protein rich)", 134, 134, 23, 5, 0, 0),
+    ("Chobani Whole Milk Plain Greek Yogurt", 150, 170, 25, 6, 3, 0),
+    ("Chobani Whole Milk Plain Greek Yogurt", 134, 170, 25, 6, 3, 0),
+]
+for i, (name, grams, cal, pro, carb, fat, fib) in enumerate(yogurt_variants):
+    req("/api/meals", "POST", {"description": name, "calories": cal,
+        "source": "manual", "items": [{"name": name, "detail": "Chobani whole milk",
+        "grams": grams, "calories": cal, "protein": pro, "carbs": carb,
+        "fat": fat, "fiber": fib}]})
+# The same oats with cooking/weight wording the model has actually produced.
+oats_variants = [
+    ("Steel cut oats (cooked)", 100, 180, 7, 32, 3, 5),
+    ("cooked steel cut oats", 110, 198, 7, 35, 3, 6),
+    ("steel cut oatmeal (dry weight 66g, cooked)", 66, 250, 9, 44, 4, 6),
+]
+for name, grams, cal, pro, carb, fat, fib in oats_variants:
+    req("/api/meals", "POST", {"description": name, "calories": cal,
+        "source": "manual", "items": [{"name": name, "grams": grams,
+        "calories": cal, "protein": pro, "carbs": carb, "fat": fat, "fiber": fib}]})
+st, qf = req("/api/quick-foods?limit=12")
 foods = qf.get("foods") or []
+by_name = {f["name"]: f for f in foods}
 check("quick foods returns entries", st == 200 and len(foods) >= 2, str(foods)[:120])
-check("most-logged food comes first", foods and foods[0]["name"] == "Sunfiber", str(foods[0])[:90])
-check("uses count is reported", foods and foods[0]["uses"] >= 3, str(foods[0])[:90])
-check("quick food carries its macros for one-tap re-log",
-      foods and foods[0]["grams"] == 7.0 and foods[0]["fiber"] == 7.0, str(foods[0])[:120])
+check("frequency ranking puts the most-used group first",
+      foods and foods[0]["uses"] >= 3, str(foods[0])[:90])
+check("brand/weight variants fold into one Greek yogurt chip",
+      "Greek yogurt" in by_name and sum(f["name"] == "Greek yogurt" for f in foods) == 1,
+      str([f["name"] for f in foods])[:160])
+check("folded yogurt reports all three uses",
+      by_name.get("Greek yogurt", {}).get("uses") == 3, str(by_name.get("Greek yogurt")))
+check("cooked/weight oat variants fold into one Steel cut oats chip",
+      "Steel cut oats" in by_name and sum(f["name"] == "Steel cut oats" for f in foods) == 1,
+      str([f["name"] for f in foods])[:160])
+check("folded oats reports all three uses",
+      by_name.get("Steel cut oats", {}).get("uses") == 3, str(by_name.get("Steel cut oats")))
+check("folded oats carries the latest macros + portion",
+      by_name.get("Steel cut oats", {}).get("grams") == 66.0
+      and by_name.get("Steel cut oats", {}).get("fiber") == 6.0,
+      str(by_name.get("Steel cut oats")))
+check("folded chip keeps a specific detail line",
+      by_name.get("Greek yogurt", {}).get("detail") == "Chobani whole milk",
+      str(by_name.get("Greek yogurt")))
+check("single-name staples still appear", "Sunfiber" in by_name, str(by_name.keys())[:120])
 st, qf1 = req("/api/quick-foods?limit=1")
 check("limit is honoured", len((qf1.get("foods") or [])) == 1, str(qf1)[:90])
+
+# Detail is a first-class field: it must survive save -> read -> chip.
+st, dm = req("/api/meals", "POST", {"description": "Greek yogurt", "calories": 170,
+    "source": "manual", "items": [{"name": "Greek yogurt", "detail": "Chobani whole milk",
+    "grams": 150, "calories": 170, "protein": 25, "carbs": 6, "fat": 3, "fiber": 0}]})
+mid_d = (dm or {}).get("id")
+st, dmeal = req(f"/api/meals/{mid_d}")
+ditems = dmeal.get("items") or []
+check("item detail survives save -> read",
+      ditems and ditems[0].get("detail") == "Chobani whole milk", str(ditems)[:120])
+if mid_d: req(f"/api/meals/{mid_d}", "DELETE")
 
 # 32. The Jev cross-check must be invisible when no key is configured.
 st, sd = req("/api/state")

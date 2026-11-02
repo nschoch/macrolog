@@ -216,7 +216,7 @@
 <!-- ======================= AI PROVIDER SHEET ======================== -->
 <div class="sheet-backdrop" id="provider-sheet" hidden>
   <div class="sheet">
-    <div class="sheet-grab"></div>
+    <div class="sheet-grab" title="Drag down or tap to close"></div>
     <h3 id="prov-sheet-title">Add provider</h3>
     <p class="hint" id="prov-sheet-hint">Add your own provider credentials. The
       key is sent to this server once and is never returned to this browser.</p>
@@ -272,7 +272,7 @@
 <!-- ======================= UNIFIED ADD-MEAL SHEET =================== -->
 <div class="sheet-backdrop" id="add-sheet" hidden>
   <div class="sheet">
-    <div class="sheet-grab"></div>
+    <div class="sheet-grab" title="Drag down or tap to close"></div>
     <h3>Add a meal</h3>
     <p class="hint">Combine whatever you have — a photo of the plate, a photo of
       the Nutrition Facts panel, and a note on how much you ate. The more inputs,
@@ -306,13 +306,13 @@
 <!-- ======================= ESTIMATE REVIEW SHEET ===================== -->
 <div class="sheet-backdrop" id="review-sheet" hidden>
   <div class="sheet">
-    <div class="sheet-grab"></div>
+    <div class="sheet-grab" title="Drag down or tap to close"></div>
     <h3>Does this look right?</h3>
     <p class="hint">Fix anything wrong — your corrections teach the estimator. Editing later also trains it.</p>
     <p class="pill warn" id="r-warn" hidden></p>
     <img id="review-img" alt="your meal" class="review-img">
     <div class="photo-actions"><button class="ghost tiny" id="btn-recrop"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-camera"></use></svg>Choose different photo</button></div>
-    <label class="fld">Description<input id="r-desc" type="text" placeholder="what did you eat?"></label>
+    <label class="fld">Meal description<input id="r-desc" type="text" placeholder="short name for the meal"></label>
     <!-- Description is a label, not a portion input. If it names a gram amount
          that disagrees with the item weight, offer a one-tap apply instead of
          silently ignoring the text (which looked like macros were stuck). -->
@@ -331,6 +331,8 @@
         <button class="ghost tiny" id="btn-add-item"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add item</button>
       </span>
     </div>
+    <p class="hint" id="r-desc-hint">General description groups quick-log
+      suggestions; specific description keeps the brand, fat level, or notes.</p>
     <div class="item-editor" id="r-items"></div>
     <p class="hint" id="r-nocomp-hint" hidden>No breakdown detected — edit totals directly below.</p>
 
@@ -369,7 +371,7 @@
 
 <div class="sheet-backdrop" id="manual-sheet" hidden>
   <div class="sheet">
-    <div class="sheet-grab"></div>
+    <div class="sheet-grab" title="Drag down or tap to close"></div>
     <h3>Log manually</h3>
     <label class="fld">Description<input id="m-desc" type="text" placeholder="e.g. protein shake"></label>
     <div class="grid4">
@@ -394,7 +396,7 @@
 <!-- ===================== APPLE HEALTH GUIDE SHEET ==================== -->
 <div class="sheet-backdrop" id="health-guide-sheet" hidden>
   <div class="sheet">
-    <div class="sheet-grab"></div>
+    <div class="sheet-grab" title="Drag down or tap to close"></div>
     <h3>Set up Apple Health</h3>
     <p class="hint">The app prepares the data; an iOS Shortcut writes it to
       Health. One Shortcut handles both today and any missed days.</p>

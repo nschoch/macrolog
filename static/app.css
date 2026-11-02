@@ -173,7 +173,8 @@ input, select, button { font: inherit; color: inherit; }
   color: var(--muted); margin-bottom: 6px; }
 .quick-chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
-  border-radius: 999px; padding: 7px 12px; font-size: 12.5px; line-height: 1; }
+  border-radius: 999px; padding: 7px 12px; font-size: 12.5px; line-height: 1;
+  white-space: nowrap; }
 .chip small { color: var(--muted); margin-left: 5px; font-size: 11px; }
 .chip:active { border-color: var(--accent-dim); }
 
@@ -247,7 +248,10 @@ input, select, button { font: inherit; color: inherit; }
 .comp-list { list-style: none; margin: 0; padding: 0 12px; max-height: 0; overflow: hidden; transition: max-height .25s ease, padding .25s ease; }
 .meal.open .comp-list { max-height: 400px; padding: 2px 12px 10px; }
 .comp-list li { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 4px 0; border-top: 1px dashed var(--line); }
-.comp-list .c-name { color: var(--text); }
+.comp-list .c-name { color: var(--text); min-width: 0; }
+.comp-list .c-detail { display: block; font-size: 10.5px; color: var(--muted);
+  font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-top: 1px; }
 .comp-list .c-g { font-variant-numeric: tabular-nums; min-width: 46px; text-align: right; }
 .comp-list .c-k { font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; color: var(--text); }
 .meal-thumb { width: 46px; height: 46px; border-radius: 9px; object-fit: cover; background: var(--panel-2); flex: none; }
@@ -383,7 +387,14 @@ button { cursor: pointer; }
   max-height: 92vh; overflow-y: auto; animation: rise .26s cubic-bezier(.3,1,.4,1);
 }
 @keyframes rise { from { transform: translateY(100%) } to { transform: none } }
-.sheet-grab { width: 38px; height: 4px; border-radius: 99px; background: var(--line); margin: 6px auto 14px; }
+/* Full-width hit target (bar is the ::before); a 4px-tall div is impossible
+   to grab on a phone and made the handle feel decorative. */
+.sheet-grab { width: 100%; height: 18px; margin: 0 auto 6px; display: flex;
+  align-items: center; justify-content: center; cursor: grab; touch-action: none;
+  -webkit-user-select: none; user-select: none; }
+.sheet-grab::before { content: ""; width: 38px; height: 4px; border-radius: 99px;
+  background: var(--line); }
+.sheet-grab:active { cursor: grabbing; }
 .sheet h3 { margin: 0 0 4px; font-size: 18px; }
 .sheet-btns { display: flex; gap: 10px; margin-top: 16px; }
 .sheet-btns .ghost { flex: 1; padding: 13px; }
@@ -402,9 +413,17 @@ button { cursor: pointer; }
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
   padding: 8px 9px; display: grid; gap: 6px;
 }
-.item-row .ir-top { display: flex; align-items: center; gap: 6px; }
-.item-row .ir-name { flex: 1; min-width: 0; background: transparent; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font-size: 14px; padding: 3px 2px; margin: 0; }
+.item-row .ir-top { display: flex; align-items: flex-end; gap: 6px; }
+/* The two-level food name: general on top (what suggestions group by), the
+   specific brand/fat/notes line directly below it. */
+.item-row .ir-desc { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.item-row .ir-name { width: 100%; flex: none; background: transparent; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font-size: 14px; padding: 3px 2px; margin: 0; }
 .item-row .ir-name:focus { outline: none; border-bottom-color: var(--accent-dim); }
+.item-row .ir-desc-specific { margin: 2px 0 6px; }
+.item-row .ir-detail { width: 100%; background: transparent; border: 0;
+  border-bottom: 1px dashed var(--line); color: var(--muted); font-size: 11.5px;
+  padding: 3px 2px; margin: 0; }
+.item-row .ir-detail:focus { outline: none; border-bottom-color: var(--accent-dim); }
 .item-row .ir-del { background: none; border: 0; color: var(--danger); font-size: 18px; line-height: 1; padding: 2px 6px; cursor: pointer; }
 /* Two columns so spelled-out labels fit without truncation. */
 .item-row .ir-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }

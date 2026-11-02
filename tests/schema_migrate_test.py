@@ -38,6 +38,12 @@ CREATE TABLE meals (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
   date TEXT NOT NULL, kind TEXT, description TEXT, calories REAL, protein REAL,
   carbs REAL, fat REAL, confidence REAL, photo_path TEXT, source TEXT,
   provider TEXT, model TEXT, raw_json TEXT, created_at INTEGER);
+CREATE TABLE meal_items (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  meal_id INTEGER NOT NULL, ord INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL DEFAULT '', grams REAL NOT NULL DEFAULT 0,
+  calories REAL NOT NULL DEFAULT 0, protein REAL NOT NULL DEFAULT 0,
+  carbs REAL NOT NULL DEFAULT 0, fat REAL NOT NULL DEFAULT 0);
+INSERT INTO meal_items(meal_id,ord,name,grams) VALUES (1,0,'Oats',40);
 CREATE TABLE exercises (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
   date TEXT NOT NULL, name TEXT, calories REAL);
 """
@@ -71,11 +77,16 @@ def main():
     check("body_fat legacy index also dropped",
           "idx_bf_date" not in indexes(path, "body_fat"), str(indexes(path, "body_fat")))
 
-    # fiber was added later: legacy tables must gain the column, defaulting to 0.
+    # fiber and the generic-name detail were added later: legacy tables must
+    # gain the columns, defaulting to 0/'' for existing rows.
     con = sqlite3.connect(path)
     for tbl in ("meals", "meal_items"):
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({tbl})")}
         check(f"{tbl} gained a fiber column", "fiber" in cols, str(sorted(cols)))
+    item_cols = {r[1] for r in con.execute("PRAGMA table_info(meal_items)")}
+    check("meal_items gained a detail column", "detail" in item_cols, str(sorted(item_cols)))
+    old_detail = con.execute("SELECT detail FROM meal_items WHERE name='Oats'").fetchone()[0]
+    check("existing items default detail to empty", old_detail == "", repr(old_detail))
     con.close()
 
     # The user-facing failure: two accounts weighing in on one day.

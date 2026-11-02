@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS meal_items (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     meal_id     INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
     ord         INTEGER NOT NULL DEFAULT 0,        -- display order within the meal
-    name        TEXT    NOT NULL DEFAULT '',
+    name        TEXT    NOT NULL DEFAULT '',       -- generic food label
+    detail      TEXT    NOT NULL DEFAULT '',       -- brand / variant / specifics
     grams       REAL    NOT NULL DEFAULT 0,
     calories    REAL    NOT NULL DEFAULT 0,
     protein     REAL    NOT NULL DEFAULT 0,
@@ -153,6 +154,13 @@ class Database:
             if "fiber" not in cols:
                 self._conn.execute(
                     f"ALTER TABLE {tbl} ADD COLUMN fiber REAL NOT NULL DEFAULT 0")
+        # Items now carry a generic `name` plus an optional `detail` line for
+        # brand/variant wording. Existing rows keep their name and default to
+        # an empty detail; suggestions derive one when the name has specifics.
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(meal_items)")}
+        if "detail" not in cols:
+            self._conn.execute(
+                "ALTER TABLE meal_items ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
         # Drop every legacy UNIQUE index that keys on date WITHOUT owner, then
         # (re)create the owner-scoped ones. Pre-multi-user databases enforced one
         # row per date across the whole household; once several OIDC users share
@@ -304,18 +312,19 @@ class Database:
             # fiber is reported INSIDE carbs, so it is summed for display only and
             # never added on top of the carb total.
             fb = float(it.get("fiber") or 0)
-            rows.append((meal_id, i, str(it.get("name") or "")[:120], g, cal, p, c, f, fb))
+            rows.append((meal_id, i, str(it.get("name") or "")[:120],
+                         str(it.get("detail") or "")[:120], g, cal, p, c, f, fb))
             tot["calories"] += cal; tot["protein"] += p
             tot["carbs"] += c; tot["fat"] += f; tot["fiber"] += fb
         if rows:
             self.executemany(
-                "INSERT INTO meal_items(meal_id,ord,name,grams,calories,protein,carbs,fat,fiber) "
-                "VALUES(?,?,?,?,?,?,?,?,?)", rows)
+                "INSERT INTO meal_items(meal_id,ord,name,detail,grams,calories,protein,"
+                "carbs,fat,fiber) VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
         return {k: round(v, 1) for k, v in tot.items()}
 
     def items_for_meal(self, meal_id: int) -> list[dict]:
         return [dict(r) for r in self.query(
-            "SELECT id,name,grams,calories,protein,carbs,fat,fiber FROM meal_items "
+            "SELECT id,name,detail,grams,calories,protein,carbs,fat,fiber FROM meal_items "
             "WHERE meal_id=? ORDER BY ord", (meal_id,))]
 
     def items_for_date(self, date: str, owner: str = "default") -> dict:
@@ -326,7 +335,8 @@ class Database:
                 "WHERE m.date=? AND m.owner=? ORDER BY mi.meal_id, mi.ord",
                 (date, owner)):
             out.setdefault(r["meal_id"], []).append({
-                "id": r["id"], "name": r["name"], "grams": r["grams"],
+                "id": r["id"], "name": r["name"], "detail": r["detail"],
+                "grams": r["grams"],
                 "calories": r["calories"], "protein": r["protein"],
                 "carbs": r["carbs"], "fat": r["fat"],
                 "fiber": (r["fiber"] if "fiber" in r.keys() else 0)})

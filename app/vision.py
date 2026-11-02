@@ -34,7 +34,7 @@ than home portions, and dressing/oil/sugar add hidden calories.
 Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "items": [
-    {"name": str, "grams": number, "calories": number,
+    {"name": str, "detail": str, "grams": number, "calories": number,
      "protein": number, "carbs": number, "fat": number, "fiber": number}
   ],
   "total_calories": number, "total_protein": number,
@@ -48,6 +48,7 @@ Rules:
 - All numbers are per-item absolute amounts for the WHOLE photographed portion, \
 not per 100g.
 - fiber is the portion of "carbs" that comes from fibre: report it as a NUMBER WITHIN the carb figure, never on top of it (carbs 30 and fiber 8 means 30 g total carbohydrate of which 8 g is fibre). Use 0 when unknown.
+- name: the generic food only -- no brand, weight, or cooking method (e.g. "greek yogurt", "steel cut oats"); detail: the specific product/brand and variant, including fat level (e.g. "Chobani nonfat plain"). Put the weight in grams, never in the name.
 - total_* must equal the sum of the item values.
 - confidence is 0.0-1.0: how sure you are given what is actually visible. Use \
 low confidence when the plate is crowded, food is mixed/unidentifiable, or \
@@ -69,7 +70,7 @@ If a written description is provided, treat it as ground truth for intent: it na
 Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "items": [
-    {"name": str, "grams": number, "calories": number,
+    {"name": str, "detail": str, "grams": number, "calories": number,
      "protein": number, "carbs": number, "fat": number, "fiber": number}
   ],
   "total_calories": number, "total_protein": number,
@@ -82,6 +83,7 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 Rules:
 - All numbers are per-item ABSOLUTE amounts for the WHOLE portion actually eaten, never per 100g and never per serving.
 - fiber is the portion of "carbs" that comes from fibre: report it as a NUMBER WITHIN the carb figure, never on top of it (carbs 30 and fiber 8 means 30 g total carbohydrate of which 8 g is fibre). Use 0 when unknown.
+- name: the generic food only -- no brand, weight, or cooking method (e.g. "greek yogurt", "steel cut oats"); detail: the specific product/brand and variant, including fat level (e.g. "Chobani nonfat plain"). Put the weight in grams, never in the name.
 - total_* must equal the sum of the item values.
 - confidence is 0.0-1.0. Use HIGH confidence when a Nutrition Facts label or an explicit stated amount pins the numbers; use LOW confidence when the plate is crowded, food is mixed/unidentifiable, or portion depth is ambiguous.
 - notes: state anything you had to assume, and flag any label values used.
@@ -101,7 +103,7 @@ amounts for the WHOLE portion (not per 100g), including fiber inside carbs.
 Return ONLY a JSON object, no markdown fences, exactly this shape:
 {
   "items": [
-    {"name": str, "grams": number, "calories": number,
+    {"name": str, "detail": str, "grams": number, "calories": number,
      "protein": number, "carbs": number, "fat": number, "fiber": number}
   ],
   "total_calories": number, "total_protein": number,
@@ -113,6 +115,7 @@ Return ONLY a JSON object, no markdown fences, exactly this shape:
 
 Rules:
 - fiber is the portion of "carbs" that comes from fibre: report it as a NUMBER WITHIN the carb figure, never on top of it (carbs 30 and fiber 8 means 30 g total carbohydrate of which 8 g is fibre). Use 0 when unknown.
+- name: the generic food only -- no brand, weight, or cooking method (e.g. "greek yogurt", "steel cut oats"); detail: the specific product/brand and variant, including fat level (e.g. "Chobani nonfat plain"). Put the weight in grams, never in the name.
 - total_* must equal the sum of the item values.
 - confidence 0.0-1.0: high when amounts and foods are explicit; low when you \
 had to guess portions or identify vague items ("some sauce").
@@ -221,6 +224,9 @@ def normalize(data: dict) -> dict:
             continue
         row = {
             "name": str(it.get("name") or "").strip()[:120],
+            # Brand/variant wording the model may have supplied alongside the
+            # generic name; the server keeps it as the item's detail line.
+            "detail": str(it.get("detail") or "").strip()[:120],
             "grams": _num(it.get("grams")),
             "calories": max(0.0, _num(it.get("calories"))),
             "protein": max(0.0, _num(it.get("protein"))),

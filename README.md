@@ -211,6 +211,7 @@ server.py            stdlib HTTP server + JSON API (no framework)
 app/
   database.py        SQLite schema + helpers (WAL, thread-safe writes)
   vision.py          provider layer: openrouter / custom / qwenplan / groq / gemini / openai / ollama / stub
+  foods.py           folds verbose model labels to generic foods for quick logging
   adaptive.py        weight→target loop + estimate calibration + food groups
 static/              mobile-first PWA (vanilla JS, no build step)
 tests/api_test.py    end-to-end API checks

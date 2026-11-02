@@ -39,6 +39,7 @@ from app.vision import (PROVIDER_KINDS, ProviderError, estimate_meal,
                         provider_default_model, provider_env_key,
                         provider_key_source)
 from app import auth as OIDC
+from app import foods as FOODS
 from app import jev as JEVC
 
 SESSION_COOKIE = "macrolog_session"
@@ -422,6 +423,7 @@ class Api:
         except Exception as e:
             _unlink(path)
             return 500, {"error": f"{type(e).__name__}: {e}"}
+        meal = _genericize_estimate(meal)
         if not meal["items"] and not meal["calories"]:
             _unlink(path)
             return 422, {"error": meal.get("notes") or "no food detected in image"}
@@ -457,6 +459,7 @@ class Api:
         try:
             meal, provider, model = estimate_meal(images, text or None,
                                                   get_settings(owner))
+            meal = _genericize_estimate(meal)
         except ProviderError as e:
             for path in images:
                 _unlink(path)
@@ -510,6 +513,7 @@ class Api:
         try:
             meal, provider, model = estimate_meal(paths, text or None,
                                                   get_settings(owner))
+            meal = _genericize_estimate(meal)
         except ProviderError as e:
             return 502, {"error": f"all providers failed: {e}"}
         except Exception as e:  # noqa: BLE001
@@ -543,6 +547,7 @@ class Api:
             return 400, {"error": "describe your meal first"}
         try:
             meal, provider, model = estimate_text(text, get_settings(owner))
+            meal = _genericize_estimate(meal)
         except ProviderError as e:
             return 502, {"error": f"all providers failed: {e}"}
         except Exception as e:
@@ -784,40 +789,62 @@ class Api:
 
         Derived from their own meal_items history rather than a favourites
         table: supplements and staples reappear on their own, so there is
-        nothing extra to curate. Each entry carries the macros of its most
-        recent occurrence, so re-adding reproduces what was logged last time.
+        nothing extra to curate. Names are folded to their generic food before
+        counting (``steel cut oatmeal (66g, cooked)`` and ``cooked steel cut
+        oats`` are one food), because otherwise a recurring bowl with a new
+        weight each day never accumulates enough uses to reach the list.
+        Ranking is frequency first, most-recent second; each entry carries the
+        macros of its latest occurrence, so re-adding reproduces the last log.
         """
         owner = getattr(h, "owner", "default")
         try:
-            limit = max(1, min(20, int((q.get("limit") or ["10"])[0])))
+            limit = max(1, min(24, int((q.get("limit") or ["12"])[0])))
         except ValueError:
-            limit = 10
+            limit = 12
         try:
-            top = db.query(
-                "SELECT MIN(mi.name) AS name, COUNT(*) AS uses, MAX(m.ts) AS last_ts "
+            rows = db.query(
+                "SELECT mi.name, mi.detail, mi.grams, mi.calories, mi.protein, "
+                "mi.carbs, mi.fat, mi.fiber, m.ts AS last_ts "
                 "FROM meal_items mi JOIN meals m ON m.id = mi.meal_id "
                 "WHERE m.owner=? AND TRIM(mi.name) != '' "
-                "GROUP BY LOWER(TRIM(mi.name)) "
-                "ORDER BY uses DESC, last_ts DESC LIMIT ?", (owner, limit))
+                "ORDER BY m.ts ASC, mi.id ASC", (owner,))
         except Exception:                                  # noqa: BLE001
             return 200, {"foods": []}
+        groups: dict[str, dict] = {}
+        for row in rows:
+            key = FOODS.food_key(row["name"])
+            g = groups.get(key)
+            if g is None:
+                g = groups[key] = {"uses": 0, "last_ts": 0, "latest": row,
+                                   "labels": {}}
+            g["uses"] += 1
+            label, derived = FOODS.canonicalize(row["name"])
+            g["labels"][label] = g["labels"].get(label, 0) + 1
+            if row["last_ts"] >= g["last_ts"]:
+                g["last_ts"] = row["last_ts"]
+                g["latest"] = row
+                g["latest_label"] = label
+                g["latest_detail"] = derived
+        ordered = sorted(groups.values(),
+                         key=lambda g: (-g["uses"], -g["last_ts"]))
         foods = []
-        for row in top:
-            latest = db.one(
-                "SELECT mi.name, mi.grams, mi.calories, mi.protein, mi.carbs, "
-                "mi.fat, mi.fiber FROM meal_items mi JOIN meals m ON m.id = mi.meal_id "
-                "WHERE m.owner=? AND LOWER(TRIM(mi.name)) = LOWER(TRIM(?)) "
-                "ORDER BY m.ts DESC, mi.id DESC LIMIT 1", (owner, row["name"]))
-            if not latest:
-                continue
+        for g in ordered[:limit]:
+            latest = g["latest"]
+            # The group's most common label reads more naturally than whichever
+            # odd variant happened to be logged last.
+            label = max(g["labels"].items(),
+                        key=lambda kv: (kv[1], kv[0] == g.get("latest_label")))[0]
+            detail = str(latest["detail"] or "").strip() or g.get("latest_detail") or ""
             foods.append({
-                "name": latest["name"], "grams": round(latest["grams"] or 0, 1),
+                "name": label or latest["name"],
+                "detail": detail,
+                "grams": round(latest["grams"] or 0, 1),
                 "calories": round(latest["calories"] or 0, 1),
                 "protein": round(latest["protein"] or 0, 1),
                 "carbs": round(latest["carbs"] or 0, 1),
                 "fat": round(latest["fat"] or 0, 1),
                 "fiber": round((latest["fiber"] if "fiber" in latest.keys() else 0) or 0, 1),
-                "uses": row["uses"],
+                "uses": g["uses"],
             })
         return 200, {"foods": foods}
 
@@ -1319,6 +1346,28 @@ def _meal_dict(m, items=None) -> dict:
     return d
 
 
+def _genericize_estimate(meal: dict) -> dict:
+    """Give estimator items a generic food label plus a specific detail line.
+
+    Models name a scan after what they see ("Chobani Nonfat Plain Greek Yogurt
+    (protein rich)"), which makes the same breakfast a different "food" every
+    day. The review sheet and the quick-log chips key off the generic label;
+    the original brand/variant wording rides along in `detail` so it is not
+    lost when the item is saved.
+    """
+    for item in meal.get("items") or []:
+        raw = str(item.get("name") or "")
+        label, derived = FOODS.canonicalize(raw)
+        if label:
+            item["name"] = label
+        detail = str(item.get("detail") or "").strip()
+        if not detail or detail.casefold() == raw.strip().casefold():
+            item["detail"] = derived
+        else:
+            item["detail"] = detail
+    return meal
+
+
 def _sanitize_items(raw) -> list[dict]:
     """Coerce client-supplied components into safe rows (name + grams + macros)."""
     out = []
@@ -1330,7 +1379,8 @@ def _sanitize_items(raw) -> list[dict]:
         cal = max(0.0, float(it.get("calories") or 0))
         if not name and g == 0 and cal == 0:
             continue
-        out.append({"name": name, "grams": g, "calories": cal,
+        out.append({"name": name, "detail": str(it.get("detail") or "").strip()[:120],
+                    "grams": g, "calories": cal,
                     "protein": max(0.0, float(it.get("protein") or 0)),
                     "carbs": max(0.0, float(it.get("carbs") or 0)),
                     "fat": max(0.0, float(it.get("fat") or 0)),
