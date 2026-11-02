@@ -167,6 +167,15 @@
     <div class="card">
       <h3>Data</h3>
       <p class="hint">Everything lives in <code>data/</code>: one SQLite file plus photos. Back it up by copying that folder.</p>
+      <label class="fld">Keep meal photos
+        <select id="s-photo-retention">
+          <option value="0">Forever</option>
+          <option value="6">6 months</option>
+          <option value="12">12 months</option>
+          <option value="24">24 months</option>
+        </select>
+      </label>
+      <p class="hint">Photos are the large part of <code>data/</code>. Older photos are deleted on the next cleanup (within 6 hours); meal totals stay. Rescan is unavailable for deleted photos.</p>
       <a class="ghost btn-link" href="/api/export"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-download"></use></svg>Download JSON backup</a>
       <p class="hint" id="app-build-line" hidden></p>
     </div>

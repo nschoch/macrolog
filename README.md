@@ -226,6 +226,21 @@ to whichever provider you configure. Provider keys live in that same SQLite
 file (per user), are never sent back to the browser after saving, and are
 excluded from JSON exports. Nothing else leaves your network.
 
+### Photo storage
+
+Meal photos are files in `data/photos/`, not blobs in SQLite, so the database
+stays small (tens of KB to a few MB) no matter how many pictures you take. New
+photos are downscaled to a 1600px long edge on save — the model only reads
+1024px, so rescan quality is unchanged. **Settings → Data → Keep meal photos**
+sets a per-user retention window (default 12 months); expired photos are
+removed by the six-hour maintenance sweep while the meal and its macros remain.
+For a one-shot cleanup (expired temps, orphan files, existing oversized photos):
+
+```bash
+python3 server.py --maintain-photos --dry-run   # report only
+python3 server.py --maintain-photos             # back up data/photos first
+```
+
 ## Status
 
 Working and tested end-to-end (API suite green, UI verified on a 420px mobile

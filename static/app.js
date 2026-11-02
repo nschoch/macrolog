@@ -1413,6 +1413,9 @@ function renderSettings() {
   $('s-autoadapt').checked = s.auto_adapt !== false && !s.calorie_target_locked;
   $('s-autoadapt').disabled = !!s.calorie_target_locked;
   $('s-calibrate').checked = s.calibrate_estimates !== false;
+  if ($('s-photo-retention')) {
+    $('s-photo-retention').value = String(s.photo_retention_months ?? 12);
+  }
   $('btn-unlock').textContent = s.calorie_target_locked ? 'locked' : 'auto';
   $('s-lock-hint').hidden = !s.calorie_target_locked;
   syncWeightDock();
@@ -1947,6 +1950,7 @@ $('btn-save').addEventListener('click', async () => {
     auto_adapt: $('s-autoadapt').checked,
     calibrate_estimates: $('s-calibrate').checked,
     time_format: $('s-timefmt') ? $('s-timefmt').value : undefined,
+    photo_retention_months: Number($('s-photo-retention').value),
   };
   const tgt = Number($('s-target').value);
   if (tgt) payload.calorie_target = tgt;

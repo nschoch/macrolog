@@ -71,6 +71,9 @@ DEFAULT_SETTINGS = {
     "calibrate_estimates": True,
     "time_format": "12h",            # 12h | 24h (display only; storage is epochs)
     "meal_gap_minutes": 45,          # meals logged within this gap = one sitting
+    # Meal photos are files, not DB blobs. 0 keeps them forever; otherwise the
+    # maintenance sweep deletes photos older than this many months (macros stay).
+    "photo_retention_months": 12,
     # Provider chain, tried in order. Empty by default: every account brings
     # its own provider/key rather than inheriting the operator's. The offline
     # stub is appended automatically when no real provider is ready.
@@ -160,7 +163,8 @@ USER_SETTING_KEYS = {"units", "sex", "age", "height_cm", "activity_factor",
                      "target_adjusted_on", "health_token_hash",
                      "health_token_created_at", "start_date", "starting_weight_kg",
                      "auto_adapt", "calibrate_estimates", "_profile_set",
-                     "meal_gap_minutes", "time_format", "providers"}
+                     "meal_gap_minutes", "time_format", "providers",
+                     "photo_retention_months"}
 
 
 def _shared_owner_label(subject: str) -> str:
@@ -721,11 +725,9 @@ class Api:
         row = db.delete_meal(int(meal_id), owner)
         if not row:
             return 404, {"error": "meal not found"}
-        if row["photo_path"] and os.path.exists(row["photo_path"]):
-            try:
-                os.remove(row["photo_path"])
-            except OSError:
-                pass
+        # A meal can own several photos (plate + label), stored as a JSON list;
+        # deleting only the raw column string would orphan all of them.
+        _delete_meal_photos(row["photo_path"])
         return 200, {"deleted": True, **_day_summary(row["date"], owner)}
 
     # ---- weight / composition -----------------------------------------
@@ -886,6 +888,12 @@ class Api:
         # a client cannot inject arbitrary keys or non-http URLs.
         current = get_settings(owner)
         personal = {k: v for k, v in body.items() if k in USER_SETTING_KEYS}
+        if "photo_retention_months" in personal:
+            try:
+                personal["photo_retention_months"] = max(
+                    0, min(120, int(personal["photo_retention_months"])))
+            except (TypeError, ValueError):
+                personal.pop("photo_retention_months", None)
         if "providers" in body:
             personal["providers"] = _clean_providers(
                 body.get("providers"), current.get("providers") or [])
@@ -1661,7 +1669,9 @@ def _promote_photo(tmp_path: str) -> str | None:
     dest = os.path.join(dest_dir, f"{int(time.time())}-{uuid.uuid4().hex[:8]}{ext}")
     try:
         shutil.move(tmp_path, dest)
-        return dest
+        # Phone originals are multi-MB; the model only ever reads a 1024px
+        # version, so keep a 1600px copy on disk instead of the raw upload.
+        return _downscale_photo(dest)
     except (OSError, shutil.Error):
         return None
 
@@ -1715,6 +1725,208 @@ def _copy_photos(stored, target_date: str) -> str | None:
         except OSError:
             continue
     return _store_photos(copied)
+
+
+# ------------------------------------------------------- photo maintenance
+def _downscale_photo(path: str, max_dim: int = 1600, quality: int = 85) -> str:
+    """Shrink a stored photo in place without changing its filename.
+
+    The DB stores the path, so the filename must stay stable when maintenance
+    rewrites a file. JPEG/PNG/WebP are re-encoded; HEIC and anything Pillow
+    cannot open are left alone. The model reads at most 1024px, so 1600px is
+    plenty for a later rescan while cutting phone originals by ~80-90%.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        return path
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        return path
+    tmp = path + ".tmp"
+    try:
+        before = os.path.getsize(path)
+        with Image.open(path) as source:
+            img = ImageOps.exif_transpose(source)
+            width, height = img.size
+            if max(width, height) <= max_dim and before <= 700 * 1024:
+                return path              # already web-sized; avoid recompression
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+            if ext in (".jpg", ".jpeg"):
+                img.save(tmp, "JPEG", quality=quality, optimize=True,
+                         progressive=True)
+            elif ext == ".webp":
+                img.save(tmp, "WEBP", quality=quality, method=6)
+            else:
+                img.save(tmp, "PNG", optimize=True)
+        if os.path.getsize(tmp) >= before and max(width, height) <= max_dim:
+            os.remove(tmp)               # recompression made it bigger
+            return path
+        os.replace(tmp, path)
+        return path
+    except Exception:                    # noqa: BLE001
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return path
+
+
+def _delete_meal_photos(stored) -> int:
+    """Delete every file a meal owns (one path or a JSON list)."""
+    removed = 0
+    for path in _stored_photo_paths(stored):
+        actual = _find_photo_file(path)
+        if actual:
+            _unlink(actual)
+            removed += 1
+    return removed
+
+
+def _photo_refs() -> set[str]:
+    """Basenames referenced by any meal, across all users."""
+    refs: set[str] = set()
+    try:
+        rows = db.query("SELECT photo_path FROM meals "
+                        "WHERE photo_path IS NOT NULL AND photo_path != ''")
+    except Exception:                    # noqa: BLE001
+        return refs
+    for row in rows:
+        refs.update(os.path.basename(p) for p in _stored_photo_paths(row["photo_path"]))
+    return refs
+
+
+def _photo_stats() -> dict:
+    files = 0
+    total = 0
+    for root, _dirs, names in os.walk(PHOTO_DIR):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                files += 1
+            except OSError:
+                pass
+    return {"files": files, "bytes": total}
+
+
+def _prune_orphan_photos(older_than_minutes: int = 60) -> tuple[int, int]:
+    """Delete permanent files no meal points at.
+
+    `tmp-*` is intentionally skipped: the temp sweep owns it (6h). A one-hour
+    grace period protects a file between promotion and the meal INSERT.
+    """
+    refs = _photo_refs()
+    cutoff = time.time() - older_than_minutes * 60
+    removed = 0
+    freed = 0
+    for root, _dirs, names in os.walk(PHOTO_DIR):
+        for name in names:
+            if name.startswith("tmp-"):
+                continue
+            full = os.path.join(root, name)
+            if name in refs:
+                continue
+            try:
+                if os.path.getmtime(full) > cutoff:
+                    continue
+                size = os.path.getsize(full)
+                os.remove(full)
+                removed += 1
+                freed += size
+            except OSError:
+                pass
+    return removed, freed
+
+
+def _shrink_referenced_photos() -> dict:
+    """Re-encode every photo a meal still references (one-time maintenance)."""
+    refs = _photo_refs()
+    before = after = 0
+    changed = 0
+    for name in refs:
+        full = _find_photo_file(name)
+        if not full:
+            continue
+        try:
+            old = os.path.getsize(full)
+        except OSError:
+            continue
+        new_path = _downscale_photo(full)
+        try:
+            new = os.path.getsize(new_path)
+        except OSError:
+            new = old
+        before += old
+        after += new
+        if new < old:
+            changed += 1
+    return {"files": len(refs), "before": before, "after": after, "changed": changed}
+
+
+def sweep_photos(verbose: bool = False) -> dict:
+    """Temp cleanup + per-user retention. Runs on startup and every 6 hours."""
+    tmp_removed = sweep_temp_photos()
+    photos_removed = 0
+    meals_cleared = 0
+    try:
+        owners = [r["owner"] for r in db.query(
+            "SELECT DISTINCT owner FROM meals "
+            "WHERE photo_path IS NOT NULL AND photo_path != ''")]
+    except Exception:                    # noqa: BLE001
+        owners = []
+    for owner in owners:
+        try:
+            months = int(get_settings(owner).get("photo_retention_months") or 0)
+        except (TypeError, ValueError):
+            months = 0
+        if months <= 0:
+            continue                     # keep forever
+        cutoff = (date.today() - timedelta(days=30 * months)).isoformat()
+        rows = db.query(
+            "SELECT id, photo_path FROM meals WHERE owner=? AND date < ? "
+            "AND photo_path IS NOT NULL AND photo_path != ''", (owner, cutoff))
+        for row in rows:
+            photos_removed += _delete_meal_photos(row["photo_path"])
+            db.execute("UPDATE meals SET photo_path='' WHERE id=? AND owner=?",
+                       (row["id"], owner))
+            meals_cleared += 1
+    out = {"tmp_removed": tmp_removed, "photos_removed": photos_removed,
+           "meals_cleared": meals_cleared}
+    if verbose and (tmp_removed or photos_removed):
+        print(f"[photos] sweep: {tmp_removed} temp, {photos_removed} expired "
+              f"photos from {meals_cleared} meals")
+    return out
+
+
+def _photo_maintenance_loop(interval: int = 6 * 3600) -> None:
+    while True:
+        time.sleep(interval)
+        try:
+            sweep_photos(verbose=True)
+        except Exception as e:           # noqa: BLE001
+            print(f"[photos] maintenance failed: {type(e).__name__}: {e}")
+
+
+def maintain_photos(dry_run: bool = False) -> dict:
+    """CLI one-shot: sweep, prune orphans, then shrink referenced photos."""
+    before = _photo_stats()
+    print(f"[photos] before: {before['files']} files, {before['bytes']/1e6:.1f} MB")
+    if dry_run:
+        print("[photos] dry run — no files changed")
+        return {"before": before, "after": before}
+    sweep = sweep_photos(verbose=True)
+    orphans, orphan_bytes = _prune_orphan_photos()
+    shrunk = _shrink_referenced_photos()
+    after = _photo_stats()
+    print(f"[photos] after:  {after['files']} files, {after['bytes']/1e6:.1f} MB")
+    print(f"[photos] orphans removed: {orphans} ({orphan_bytes/1e6:.1f} MB); "
+          f"shrunk {shrunk['changed']} of {shrunk['files']} referenced files "
+          f"({shrunk['before']/1e6:.1f} -> {shrunk['after']/1e6:.1f} MB)")
+    return {"before": before, "after": after, "sweep": sweep,
+            "orphans": orphans, "orphan_bytes": orphan_bytes, "shrunk": shrunk}
 
 
 def _maybe_adapt(settings: dict, persist: bool = False, force: bool = False,
@@ -2226,11 +2438,22 @@ def main():
                     help="PEM cert; enables HTTPS (required for iPhone camera over LAN)")
     ap.add_argument("--tls-key", default=os.environ.get("MACROLOG_TLS_KEY"),
                     help="PEM private key matching --tls-cert")
+    ap.add_argument("--maintain-photos", action="store_true",
+                    help="sweep temp/orphan photos, apply retention, shrink "
+                         "stored photos, then exit")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --maintain-photos: report only, change nothing")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
     load_env()
     os.makedirs(PHOTO_DIR, exist_ok=True)
+    if args.maintain_photos:
+        maintain_photos(dry_run=args.dry_run)
+        return
+    # One startup sweep, then a light 6-hour loop in the serving process.
+    sweep_photos(verbose=True)
+    threading.Thread(target=_photo_maintenance_loop, daemon=True).start()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
