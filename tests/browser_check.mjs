@@ -865,7 +865,8 @@ try {
   })()`);
   const fb = JSON.parse(fib);
   check('component fields are spelled out, not abbreviated',
-        JSON.stringify(fb.labels) === JSON.stringify(['Grams', 'Calories', 'Protein', 'Carbs', 'Fat', 'Fiber of carbs']),
+        JSON.stringify(fb.labels) === JSON.stringify(['General description', 'Specific description',
+                                                      'Grams', 'Calories', 'Protein', 'Carbs', 'Fat', 'Fiber of carbs']),
         JSON.stringify(fb.labels));
   check('units are shown inside each input',
         JSON.stringify(fb.units) === JSON.stringify(['g', 'kcal', 'g', 'g', 'g', 'g']),
@@ -1110,6 +1111,42 @@ try {
   check('canvas height stable across redraws', new Set(stab).size === 1 && stab[0] <= 400, JSON.stringify(stab));
   check('trend stats populated', await evalJson(
     `document.getElementById('trend-stats').textContent.includes('Current')`));
+
+  // Regression (audit M11): deleting through the UI must keep `state` intact.
+  const errsDel = jsErrors.length;
+  const del = await evalJson(`(async () => {
+    window.confirm = () => true;
+    await api('meals', { method: 'POST', body: JSON.stringify(
+      { description: 'ui delete probe', calories: 123, kind: 'snack' }) });
+    viewDate = null; await refresh();
+    const row = [...document.querySelectorAll('.meal')]
+      .find(li => li.textContent.includes('ui delete probe'));
+    if (!row) return { found: false };
+    row.querySelector('[data-act="del"]').click();
+    for (let i = 0; i < 40 && (state?.meals || []).some(m => m.description === 'ui delete probe'); i++)
+      await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));
+    return { found: true, stateOk: !!state && Array.isArray(state.meals),
+             gone: !(state?.meals || []).some(m => m.description === 'ui delete probe') };
+  })()`);
+  check('UI delete keeps state and removes the meal',
+        del.found && del.stateOk && del.gone, JSON.stringify(del));
+  check('UI delete produced no JS error', jsErrors.length === errsDel,
+        jsErrors.slice(errsDel).join(' | ').slice(0, 300));
+
+  // Regression (audit M12): a guarded button runs its handler once per tap burst.
+  const guard = await evalJson(`(async () => {
+    const b = document.createElement('button'); b.id = 'guard-probe';
+    document.body.appendChild(b); let n = 0;
+    guardClick('guard-probe', async () => { n++; await new Promise(r => setTimeout(r, 200)); });
+    b.click(); b.click(); b.click();
+    const disabledMid = b.disabled;
+    await new Promise(r => setTimeout(r, 350));
+    const res = { n, disabledMid, enabledAfter: !b.disabled };
+    b.remove(); return res;
+  })()`);
+  check('double tap runs a guarded save once and re-enables the button',
+        guard.n === 1 && guard.disabledMid && guard.enabledAfter, JSON.stringify(guard));
 
   // Screenshot for the record.
   const shot = await send('Page.captureScreenshot', { format: 'png' });

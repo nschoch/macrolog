@@ -2,6 +2,22 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+
+// Click handler that cannot run twice at once: a double tap on Save used to
+// log the meal twice (and the duplicate lost its photo).
+function guardClick(id, fn) {
+  const btn = $(id);
+  if (!btn) return;
+  btn.addEventListener('click', async (ev) => {
+    if (btn.dataset.busy) return;
+    btn.dataset.busy = '1';
+    btn.disabled = true;
+    try { await fn(ev); } finally {
+      delete btn.dataset.busy;
+      btn.disabled = false;
+    }
+  });
+}
 const CIRC = 2 * Math.PI * 86;
 let state = null;
 let pendingPhoto = null;   // { temp_photo, dataUrl }
@@ -383,7 +399,10 @@ $('meal-groups').addEventListener('click', async (e) => {
   if (btn.dataset.act === 'del') {
     if (!confirm(`Delete "${meal.description || 'this meal'}"?`)) return;
     try {
-      state = await api(`meals/${id}`, { method: 'DELETE' }).then(refresh);
+      // refresh() reassigns `state` itself; assigning its (undefined) return
+      // value here used to blank state and break Edit/Delete/Settings.
+      await api(`meals/${id}`, { method: 'DELETE' });
+      await refresh();
       toast('Meal deleted');
     } catch (err) { toast(err.message, true); }
     return;
@@ -894,7 +913,7 @@ document.querySelectorAll('.sheet-grab').forEach((grab) => {
   grab.addEventListener('pointercancel', finish);
 });
 
-$('btn-save-review').addEventListener('click', async () => {
+guardClick('btn-save-review', async () => {
   const hasComps = compItems.length > 0;
   const cleanComps = compItems
     .filter(i => (i.name || +i.grams || +i.calories))
@@ -955,7 +974,7 @@ $('btn-save-review').addEventListener('click', async () => {
 $('btn-cancel-manual').addEventListener('click', closeSheets);
 $('manual-sheet').addEventListener('click', (e) => { if (e.target.id === 'manual-sheet') closeSheets(); });
 
-$('btn-save-manual').addEventListener('click', async () => {
+guardClick('btn-save-manual', async () => {
   const payload = {
     description: $('m-desc').value.trim(),
     calories: Number($('m-cal').value) || 0,
@@ -1141,7 +1160,7 @@ $('btn-enter-values').addEventListener('click', () => {
 });
 
 // -------------------------------------------------------------------- weight
-$('btn-weight').addEventListener('click', async () => {
+guardClick('btn-weight', async () => {
   const value = Number($('w-value').value);
   if (!value) { toast('Enter a weight first', true); return; }
   try {
@@ -1872,7 +1891,7 @@ $('btn-load-models')?.addEventListener('click', async () => {
   }
 });
 
-$('btn-prov-save')?.addEventListener('click', async () => {
+guardClick('btn-prov-save', async () => {
   const kind = $('prov-kind').value;
   const base = $('prov-base').value.trim();
   const model = $('prov-model').value.trim();
