@@ -226,12 +226,21 @@ input, select, button { font: inherit; color: inherit; }
 
 /* ------------------------------------------------------- meal groupings */
 .meal-group { margin-bottom: 18px; }
-.group-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px;
-  padding-bottom: 6px; border-bottom: 1px solid var(--line); }
-.group-head h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--accent); }
-.group-meta { color: var(--muted); font-size: 12px; }
-.group-kcal { margin-left: auto; font-weight: 700; font-size: 14px; }
+.group-head { display: grid; grid-template-columns: 1fr auto; align-items: center;
+  gap: 1px 10px; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.group-head h3 { grid-column: 1; grid-row: 1; margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--accent); }
+.group-meta { grid-column: 1; grid-row: 2; color: var(--muted); font-size: 12px; }
+.group-kcal { grid-column: 2; grid-row: 1; justify-self: end; font-weight: 700; font-size: 14px; }
 .group-kcal small { color: var(--muted); font-weight: 400; margin-left: 3px; font-size: 10px; }
+.group-add { grid-column: 2; grid-row: 2; justify-self: end; padding: 3px 8px; font-size: 11px; line-height: 1.3; }
+.group-add .icon { width: 12px; height: 12px; margin-right: 3px; }
+
+/* Green context strip for "this joins Breakfast" in Add / Manual / Review. */
+.scope-banner { margin: 0 0 12px; padding: 9px 11px; border-radius: 10px;
+  background: rgba(34,197,94,.08); border: 1px solid #275c3a; color: #86efac;
+  font-size: 12.5px; line-height: 1.4; }
+.save-another { width: 100%; margin-top: 16px; }
+.save-another + .sheet-btns { margin-top: 10px; }
 
 /* ---------------------------------------------------------------- meals */
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin: 20px 0 8px; }

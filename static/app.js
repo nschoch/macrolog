@@ -335,7 +335,7 @@ function mealRowHtml(m) {
         ${thumb}
         <div class="meal-info">
           <div class="meal-desc">${esc(m.description || m.kind || 'Meal')}</div>
-          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.kind && m.kind !== 'other' ? ' · ' + esc(cap(m.kind)) : ''}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} items` : ''}</div>
+          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} item${comps.length === 1 ? '' : 's'}` : ''}</div>
         </div>
         <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
         <div class="meal-actions">
@@ -376,12 +376,16 @@ function renderGroups(groups, meals) {
   host.innerHTML = groups.map(g => {
     const rows = g.meal_ids.map(id => byId[id]).filter(Boolean).map(mealRowHtml).join('');
     const t = fmtTime(g.start_ts);
-    const extra = g.count > 1 ? ` · ${g.count} items` : '';
-    return `<section class="meal-group">
+    // A group is the meal (the sitting); each record under it is one food.
+    // Calling the record count "items" collided with a food's components.
+    const n = +g.count || 0;
+    return `<section class="meal-group" data-group="${g.id}">
       <header class="group-head">
         <h3>${esc(g.label)}</h3>
-        <span class="group-meta">${t}${extra}</span>
         <span class="group-kcal">${fmt(g.calories)}<small>kcal</small></span>
+        <span class="group-meta">${t} · ${n} food${n === 1 ? '' : 's'}</span>
+        <button class="ghost tiny group-add" data-add-food="${g.id}"
+          title="Add another food to ${esc(g.label)}"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add food</button>
       </header>
       <ul class="meal-list">${rows}</ul>
     </section>`;
@@ -395,6 +399,17 @@ const iconSvg = (name) =>
   `<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
 
 // ------------------------------------------------------------- meal actions
+// "+ Add food" on a group header: compose the next food directly into that
+// sitting. This is the morning-coffee/dinner-side case without asking the user
+// to hunt for the pencil icon first.
+$('meal-groups').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-add-food]');
+  if (!btn) return;
+  const g = findGroup(btn.dataset.addFood);
+  if (!g) return;
+  openAddSheet(scopeForGroup(g));
+});
+
 $('meal-groups').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
@@ -420,7 +435,7 @@ $('meal-groups').addEventListener('click', async (e) => {
       estimate: {
         description: meal.description, calories: meal.calories,
         protein: meal.protein, carbs: meal.carbs, fat: meal.fat,
-        items: meal.items || [], ts: meal.ts, date: meal.date,
+        items: meal.items || [], ts: meal.ts, date: meal.date, kind: meal.kind,
       },
       provider: meal.provider, model: meal.model, editingId: id,
       // Carry the saved photo list through this path too; otherwise opening a
@@ -448,6 +463,40 @@ $('meal-groups').addEventListener('click', async (e) => {
 
 // ------------------------------------------------------------ review sheet
 let compItems = [];        // live editable components for the open meal
+// When the Add sheet is opened from a group on Today ("+ Add food"), this holds
+// the target sitting so the new food is saved into it instead of becoming a
+// separate meal. Null means a normal, unscoped Add.
+let addTarget = null;
+// The same target while the review sheet is open. Kept separately so closing
+// one sheet does not silently retarget the other.
+let reviewScope = null;
+
+function hmOfTs(ts) {
+  const d = new Date((+ts || 0) * 1000);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+// A sitting on Today, expressed as the date/time a new food must carry to join
+// it. Using the group's start keeps the derived 45-minute clustering intact
+// without storing a group id anywhere.
+function scopeForGroup(g) {
+  return {
+    groupId: g.id,
+    label: g.label,
+    start_ts: g.start_ts,
+    date: state?.date || todayISO(),
+    time: hmOfTs(g.start_ts),
+  };
+}
+
+function findGroup(groupId) {
+  return (state?.groups || []).find(g => String(g.id) === String(groupId)) || null;
+}
+
+function findGroupForMeal(mealId) {
+  return (state?.groups || []).find(g =>
+    (g.meal_ids || []).some(id => String(id) === String(mealId))) || null;
+}
 
 function nowHM() { const d = new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function todayISO() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
@@ -635,13 +684,24 @@ function renderCompEditor() {
 }
 
 function openReview({ estimate, provider, model, calibrated, previewUrl, photoUrl,
-                      editingId, warning, photos, source, crosscheck }) {
+                      editingId, warning, photos, source, crosscheck, addTo }) {
   const e = estimate || {};
+  reviewScope = addTo || null;
   $('review-sheet').dataset.editing = editingId || '';
   // photo = camera/label shot, text = AI from a description, manual = typed or
   // re-logged from history (no model call).
   $('review-sheet').dataset.source = source
     || (previewUrl || photoUrl ? 'photo' : 'text');
+  const scopeEl = $('r-scope');
+  if (scopeEl) {
+    if (reviewScope) {
+      scopeEl.textContent = `Adding to ${reviewScope.label} · ${fmtTime(reviewScope.start_ts)}`;
+      scopeEl.hidden = false;
+    } else {
+      scopeEl.textContent = '';
+      scopeEl.hidden = true;
+    }
+  }
   $('r-desc').value = e.description || '';
   compItems = (e.items || []).map(i => {
     const copy = { ...i };
@@ -658,10 +718,20 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   $('r-car').value = Math.round(e.carbs || 0);
   $('r-fat').value = Math.round(e.fat || 0);
 
-  // Date/time default to now (or the meal's stored time when editing).
-  const ts = e.ts ? new Date(e.ts * 1000) : new Date();
-  $('r-date').value = editingId && e.date ? e.date : (viewDate || todayISO());
-  $('r-time').value = editingId && e.ts ? `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}` : nowHM();
+  // Date/time default to now, the meal's stored time when editing, or the
+  // target sitting's time when adding another food to it.
+  $('r-date').value = editingId && e.date ? e.date
+    : (reviewScope ? reviewScope.date : (viewDate || todayISO()));
+  $('r-time').value = editingId && e.ts ? hmOfTs(e.ts)
+    : (reviewScope ? reviewScope.time : nowHM());
+  // Never inherit the previous meal's select value.
+  $('r-kind').value = editingId && e.kind ? e.kind : 'auto';
+
+  // The primary action names what will happen. "Add to log" while editing was a
+  // lie (it PATCHes) and hid which sitting a scoped add targets.
+  const saveLabel = editingId ? 'Save changes'
+    : (reviewScope ? `Add to ${reviewScope.label}` : 'Add to log');
+  if ($('btn-save-review-label')) $('btn-save-review-label').textContent = saveLabel;
 
   const img = $('review-img');
   // Prefer an explicit list (a rescan result), then saved-meal photos, then the
@@ -790,7 +860,8 @@ $('btn-rescan').addEventListener('click', async () => {
   if (!reviewPhotos.length) { toast('No photo to rescan', true); return; }
   const keep = { date: $('r-date').value, time: $('r-time').value,
                  kind: $('r-kind').value, editing: $('review-sheet').dataset.editing,
-                 preview: $('review-img').src || null };
+                 preview: $('review-img').src || null,
+                 scope: reviewScope };
   loading(true, 'Re-scanning photo…');
   try {
     const data = await api('rescan', {
@@ -802,6 +873,7 @@ $('btn-rescan').addEventListener('click', async () => {
       photos: data.photos || reviewPhotos,
       editingId: keep.editing || undefined,
       previewUrl: keep.preview,
+      addTo: keep.scope,
     }));
     // openReview re-derives these; put back whatever the user had chosen.
     if (keep.date) $('r-date').value = keep.date;
@@ -853,6 +925,11 @@ function closeSheets() {
   $('review-sheet').dataset.source = '';
   $('manual-sheet').hidden = true;
   $('add-sheet').hidden = true;
+  addTarget = null;
+  reviewScope = null;
+  if ($('add-scope')) $('add-scope').hidden = true;
+  if ($('manual-scope')) $('manual-scope').hidden = true;
+  if ($('r-scope')) $('r-scope').hidden = true;
   document.body.style.overflow = '';
 }
 
@@ -920,61 +997,91 @@ document.querySelectorAll('.sheet-grab').forEach((grab) => {
   grab.addEventListener('pointercancel', finish);
 });
 
-guardClick('btn-save-review', async () => {
-  const hasComps = compItems.length > 0;
-  const cleanComps = compItems
-    .filter(i => (i.name || +i.grams || +i.calories))
-    // _unit/_manual are view state; the server only stores real nutrition fields.
-    .map(({ _unit, _manual, _status, ...rest }) => rest);
-  const payload = {
-    description: $('r-desc').value.trim(),
-    kind: $('r-kind').value,
-    date: $('r-date').value || viewDate || undefined,
-    time: $('r-time').value || undefined,
-    source: $('review-sheet').dataset.source || 'photo',
-  };
-  if (cleanComps.length) {
-    payload.items = cleanComps;
-    const t = sumComps();
-    payload.calories = t.calories; payload.protein = t.protein;
-    payload.carbs = t.carbs; payload.fat = t.fat; payload.fiber = t.fiber;
-  } else {
-    payload.calories = Number($('r-cal').value) || 0;
-    payload.protein = Number($('r-pro').value) || 0;
-    payload.carbs = Number($('r-car').value) || 0;
-    payload.fat = Number($('r-fat').value) || 0;
-    payload.fiber = Number($('r-fib') ? $('r-fib').value : 0) || 0;
-  }
-  // 0 kcal is fine for supplements; refuse only a completely empty entry.
-  if (payload.calories < 0) { toast('Calories cannot be negative', true); return; }
-  if (!payload.calories && !payload.description && !cleanComps.length) {
-    toast('Add a description or at least one component', true); return;
-  }
+let reviewSaveBusy = false;
 
-  const editingId = $('review-sheet').dataset.editing;
+// Shared by "Add to log"/"Save changes" and "Save & add another food". The
+// second path saves the current food, then reopens the Add sheet scoped to the
+// sitting it landed in, so a multi-photo meal never needs a trip back to Today.
+async function saveReview({ addAnother = false } = {}) {
+  if (reviewSaveBusy) return;
+  reviewSaveBusy = true;
   try {
-    if (editingId) {
-      await api(`meals/${editingId}`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      toast('Updated — correction recorded');
+    const cleanComps = compItems
+      .filter(i => (i.name || +i.grams || +i.calories))
+      // _unit/_manual are view state; the server only stores real nutrition fields.
+      .map(({ _unit, _manual, _status, ...rest }) => rest);
+    const scope = reviewScope;
+    const payload = {
+      description: $('r-desc').value.trim(),
+      kind: $('r-kind').value,
+      date: $('r-date').value || (scope && scope.date) || viewDate || undefined,
+      time: $('r-time').value || (scope && scope.time) || undefined,
+      source: $('review-sheet').dataset.source || 'photo',
+    };
+    if (cleanComps.length) {
+      payload.items = cleanComps;
+      const t = sumComps();
+      payload.calories = t.calories; payload.protein = t.protein;
+      payload.carbs = t.carbs; payload.fat = t.fat; payload.fiber = t.fiber;
     } else {
-      await api('meals', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({}, payload,
-          stagedForSave.length ? { photos: stagedForSave }
-                               : { photo_path: pendingPhoto })),
-      });
-      stagedForSave = [];
-      clearStaged();
-      pendingPhoto = null;
-      toast('Logged');
+      payload.calories = Number($('r-cal').value) || 0;
+      payload.protein = Number($('r-pro').value) || 0;
+      payload.carbs = Number($('r-car').value) || 0;
+      payload.fat = Number($('r-fat').value) || 0;
+      payload.fiber = Number($('r-fib') ? $('r-fib').value : 0) || 0;
     }
-    closeSheets();
-    await refresh();
-  } catch (err) { toast(err.message, true); }
-});
+    // 0 kcal is fine for supplements; refuse only a completely empty entry.
+    if (payload.calories < 0) { toast('Calories cannot be negative', true); return; }
+    if (!payload.calories && !payload.description && !cleanComps.length) {
+      toast('Add a description or at least one component', true); return;
+    }
+
+    const editingId = $('review-sheet').dataset.editing;
+    let savedId = editingId ? Number(editingId) : null;
+    try {
+      if (editingId) {
+        await api(`meals/${editingId}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        const res = await api('meals', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({}, payload,
+            stagedForSave.length ? { photos: stagedForSave }
+                                 : { photo_path: pendingPhoto })),
+        });
+        savedId = res.id;
+        stagedForSave = [];
+        clearStaged();
+        pendingPhoto = null;
+      }
+      closeSheets();
+      await refresh();
+
+      if (addAnother) {
+        const group = savedId ? findGroupForMeal(savedId) : null;
+        if (group) {
+          openAddSheet(scopeForGroup(group));
+          toast(`Saved — add the next food to ${group.label}`);
+        } else {
+          openAddSheet();
+          toast('Saved — add another food');
+        }
+        return;
+      }
+
+      if (editingId) toast('Updated — correction recorded');
+      else if (scope) toast(`Added to ${scope.label}`);
+      else toast('Logged');
+    } catch (err) { toast(err.message, true); }
+  } finally {
+    reviewSaveBusy = false;
+  }
+}
+
+guardClick('btn-save-review', () => saveReview());
+guardClick('btn-save-another', () => saveReview({ addAnother: true }));
 
 // -------------------------------------------------------------- manual entry
 // (Manual entry is opened from the Add-meal sheet's 'Manual' button.)
@@ -982,6 +1089,7 @@ $('btn-cancel-manual').addEventListener('click', closeSheets);
 $('manual-sheet').addEventListener('click', (e) => { if (e.target.id === 'manual-sheet') closeSheets(); });
 
 guardClick('btn-save-manual', async () => {
+  const scope = addTarget;
   const payload = {
     description: $('m-desc').value.trim(),
     calories: Number($('m-cal').value) || 0,
@@ -989,9 +1097,10 @@ guardClick('btn-save-manual', async () => {
     carbs: Number($('m-car').value) || 0,
     fat: Number($('m-fat').value) || 0,
     fiber: Number($('m-fib') ? $('m-fib').value : 0) || 0,
-    kind: $('m-kind').value,
+    kind: scope ? 'auto' : $('m-kind').value,
     source: 'manual',
-    date: viewDate || undefined,
+    date: scope ? scope.date : (viewDate || undefined),
+    time: scope ? scope.time : undefined,
   };
   if (payload.calories < 0) { toast('Calories cannot be negative', true); return; }
   if (!payload.calories && !payload.description) {
@@ -1003,7 +1112,7 @@ guardClick('btn-save-manual', async () => {
       body: JSON.stringify(payload),
     });
     closeSheets();
-    toast('Logged');
+    toast(scope ? `Added to ${scope.label}` : 'Logged');
     await refresh();
   } catch (err) { toast(err.message, true); }
 });
@@ -1059,6 +1168,7 @@ $('quick-chips').addEventListener('click', (e) => {
   const item = { name: f.name, detail: f.detail || '', grams: f.grams,
                  calories: f.calories, protein: f.protein, carbs: f.carbs,
                  fat: f.fat, fiber: f.fiber };
+  const scope = addTarget;
   clearStaged();
   stagedForSave = [];
   $('add-sheet').hidden = true;
@@ -1066,8 +1176,9 @@ $('quick-chips').addEventListener('click', (e) => {
     estimate: { description: f.name, items: [item], calories: f.calories,
                 protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber },
     source: 'manual',
+    addTo: scope,
   });
-  toast(`${f.name} — check the portion`);
+  toast(scope ? `${f.name} — adding to ${scope.label}` : `${f.name} — check the portion`);
 });
 
 function clearStaged() {
@@ -1077,23 +1188,41 @@ function clearStaged() {
   stagedPhotos = [];
 }
 
-function openAddSheet() {
+function openAddSheet(scope = null) {
   // Start every entry from a clean slate. Clearing on OPEN rather than on each
   // exit path matters because saves close via inline code (not closeSheets)
   // and cancels come from several buttons -- any one of them forgetting a reset
   // used to leave the previous meal's note sitting in the box, ready to be
   // estimated again as if it were the new one.
+  addTarget = scope || null;
   $('a-text').value = '';
   clearStaged();
   stagedForSave = [];
+
+  const title = $('add-sheet-title');
+  if (title) title.textContent = scope ? `Add food to ${scope.label}` : 'Add a meal';
+  const banner = $('add-scope');
+  if (banner) {
+    banner.hidden = !scope;
+    banner.textContent = scope
+      ? `Joins ${scope.label} at ${fmtTime(scope.start_ts)} — saved as one food in that meal, not a new meal.`
+      : '';
+  }
+  const hint = $('add-sheet-hint');
+  if (hint) {
+    hint.textContent = scope
+      ? 'Photograph this food on its own — plus its Nutrition Facts panel if it has one — or describe it. It joins the meal above.'
+      : 'Combine whatever you have — a photo of the plate, a photo of the Nutrition Facts panel, and a note on how much you ate. The more inputs, the better the estimate.';
+  }
+
   $('add-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
   renderTray();
   loadQuickFoods();
 }
 
-$('btn-add-meal').addEventListener('click', openAddSheet);
-$('btn-add-meal-fab').addEventListener('click', openAddSheet);
+$('btn-add-meal').addEventListener('click', () => openAddSheet());
+$('btn-add-meal-fab').addEventListener('click', () => openAddSheet());
 $('btn-cancel-add').addEventListener('click', () => { clearStaged(); closeSheets(); });
 $('add-sheet').addEventListener('click', (e) => {
   if (e.target.id === 'add-sheet') { clearStaged(); closeSheets(); }
@@ -1102,7 +1231,7 @@ $('add-sheet').addEventListener('click', (e) => {
 function stageFile(file) {
   if (!file) return;
   if (file.size > 12 * 1024 * 1024) { toast('Image too large (max 12MB)', true); return; }
-  if (stagedPhotos.length >= 4) { toast('Up to 4 photos per meal', true); return; }
+  if (stagedPhotos.length >= 4) { toast('Up to 4 photos per food', true); return; }
   const reader = new FileReader();
   reader.onload = () => {
     stagedPhotos.push({ blob: file, url: reader.result });
@@ -1148,6 +1277,7 @@ $('btn-estimate-meal').addEventListener('click', async () => {
     stagedForSave = data.temp_photos || [];
     openReview(Object.assign({}, data, {
       previewUrl: stagedPhotos.length ? stagedPhotos[0].url : null,
+      addTo: addTarget,
     }));
   } catch (err) {
     toast(err.message, true);
@@ -1162,6 +1292,15 @@ $('btn-enter-values').addEventListener('click', () => {
   $('add-sheet').hidden = true;
   ['m-desc', 'm-cal', 'm-pro', 'm-car', 'm-fat'].forEach(id => { $(id).value = ''; });
   $('m-kind').value = 'auto';   // don't inherit the previous entry's meal type
+  if ($('manual-title')) {
+    $('manual-title').textContent = addTarget ? `Add food to ${addTarget.label}` : 'Log manually';
+  }
+  if ($('manual-scope')) {
+    $('manual-scope').hidden = !addTarget;
+    $('manual-scope').textContent = addTarget
+      ? `Joins ${addTarget.label} at ${fmtTime(addTarget.start_ts)} — saved as one food in that meal.`
+      : '';
+  }
   $('manual-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
 });

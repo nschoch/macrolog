@@ -287,8 +287,11 @@
 <div class="sheet-backdrop" id="add-sheet" hidden>
   <div class="sheet">
     <div class="sheet-grab" title="Drag down or tap to close"></div>
-    <h3>Add a meal</h3>
-    <p class="hint">Combine whatever you have — a photo of the plate, a photo of
+    <h3 id="add-sheet-title">Add a meal</h3>
+    <!-- Shown when the sheet was opened from a meal group on Today. The food
+         being estimated is an addition to that sitting, not a new meal. -->
+    <p class="scope-banner" id="add-scope" hidden></p>
+    <p class="hint" id="add-sheet-hint">Combine whatever you have — a photo of the plate, a photo of
       the Nutrition Facts panel, and a note on how much you ate. The more inputs,
       the better the estimate.</p>
 
@@ -323,10 +326,11 @@
     <div class="sheet-grab" title="Drag down or tap to close"></div>
     <h3>Does this look right?</h3>
     <p class="hint">Fix anything wrong — your corrections teach the estimator. Editing later also trains it.</p>
+    <p class="scope-banner" id="r-scope" hidden></p>
     <p class="pill warn" id="r-warn" hidden></p>
     <img id="review-img" alt="your meal" class="review-img">
     <div class="photo-actions"><button class="ghost tiny" id="btn-recrop"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-camera"></use></svg>Choose different photo</button></div>
-    <label class="fld">Meal description<input id="r-desc" type="text" placeholder="short name for the meal"></label>
+    <label class="fld">Food description<input id="r-desc" type="text" placeholder="short name for this food"></label>
     <!-- Description is a label, not a portion input. If it names a gram amount
          that disagrees with the item weight, offer a one-tap apply instead of
          silently ignoring the text (which looked like macros were stuck). -->
@@ -342,7 +346,7 @@
         <!-- Re-run the model over the photo(s) we already have. Shown only when
              there is an image to rescan (hidden for text-only entries). -->
         <button class="ghost tiny" id="btn-rescan" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-refresh"></use></svg>Rescan photo</button>
-        <button class="ghost tiny" id="btn-add-item"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add item</button>
+        <button class="ghost tiny" id="btn-add-item"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add component</button>
       </span>
     </div>
     <p class="hint" id="r-desc-hint">General description groups quick-log
@@ -376,9 +380,12 @@
          repeating a past meal without moving the original. -->
     <button class="ghost" id="btn-copy-meal" hidden
       title="Copy the saved meal to today"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg>Copy this saved meal to today</button>
+    <!-- Save this food, then immediately open a scoped Add sheet for the next
+         food in the same sitting. Keeps a multi-photo meal one flow. -->
+    <button class="ghost save-another" id="btn-save-another"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Save &amp; add another food</button>
     <div class="sheet-btns">
       <button class="ghost" id="btn-cancel-review">Cancel</button>
-      <button class="primary" id="btn-save-review"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg>Add to log</button>
+      <button class="primary" id="btn-save-review"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg><span id="btn-save-review-label">Add to log</span></button>
     </div>
   </div>
 </div>
@@ -386,7 +393,8 @@
 <div class="sheet-backdrop" id="manual-sheet" hidden>
   <div class="sheet">
     <div class="sheet-grab" title="Drag down or tap to close"></div>
-    <h3>Log manually</h3>
+    <h3 id="manual-title">Log manually</h3>
+    <p class="scope-banner" id="manual-scope" hidden></p>
     <label class="fld">Description<input id="m-desc" type="text" placeholder="e.g. protein shake"></label>
     <div class="grid4">
       <label class="fld">kcal<input id="m-cal" type="number" inputmode="numeric"></label>

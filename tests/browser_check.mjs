@@ -493,6 +493,105 @@ try {
         JSON.stringify(grouped.heads));
   check('group headers show derived labels', grouped.heads.length >= 1, JSON.stringify(grouped.heads));
 
+  // ---- Group-as-meal: add another food straight into the sitting ----------
+  const groupAdd = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    viewDate = '';
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    const meal = (state.meals || []).find(m => m.description === 'grp-one');
+    const g = meal && (state.groups || []).find(x => (x.meal_ids || []).includes(meal.id));
+    if (!g) return JSON.stringify({ error: 'no group for grp-one' });
+    const btn = document.querySelector('[data-add-food="' + g.id + '"]');
+    if (!btn) return JSON.stringify({ error: 'no add-food button' });
+    const d = new Date(g.start_ts * 1000);
+    const expectedTime = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    const out = {
+      beforeCount: g.count,
+      expectedTime,
+      expectedDate: state.date,
+      headText: btn.closest('.group-head').innerText,
+    };
+    btn.click();
+    await wait(350);
+    out.addOpen = !document.getElementById('add-sheet').hidden;
+    out.title = document.getElementById('add-sheet-title').textContent;
+    out.scope = document.getElementById('add-scope').hidden ? '' : document.getElementById('add-scope').textContent;
+    document.getElementById('a-text').value = 'group add probe';
+    document.getElementById('btn-estimate-meal').click();
+    for (let i = 0; i < 80; i++) { await wait(200); if (document.getElementById('loading').hidden) break; }
+    await wait(300);
+    out.reviewOpen = !document.getElementById('review-sheet').hidden;
+    out.scopeNote = document.getElementById('r-scope').hidden ? '' : document.getElementById('r-scope').textContent;
+    out.reviewDate = document.getElementById('r-date').value;
+    out.reviewTime = document.getElementById('r-time').value;
+    out.primary = document.getElementById('btn-save-review-label').textContent;
+    out.another = !document.getElementById('btn-save-another').hidden;
+    document.getElementById('btn-save-review').click();
+    await wait(2600);
+    const st = await fetch('/api/state').then(r => r.json());
+    const probe = (st.meals || []).find(m => m.description === 'group add probe');
+    const g2 = (st.groups || []).find(x => (x.meal_ids || []).includes(probe && probe.id));
+    out.probeSaved = !!probe;
+    out.joined = !!g2 && (g2.meal_ids || []).includes(meal.id);
+    out.count = g2 ? g2.count : -1;
+    const gEl = g2 ? document.querySelector('.meal-group[data-group="' + g2.id + '"]') : null;
+    out.headAfter = gEl ? gEl.querySelector('.group-head').innerText : '';
+    const pRow = probe ? [...document.querySelectorAll('.meal-row')]
+      .find(r => r.textContent.includes('group add probe')) : null;
+    out.probeMeta = pRow ? pRow.querySelector('.meal-meta').textContent : '';
+    if (probe) await fetch('/api/meals/' + probe.id, { method: 'DELETE' });
+    return JSON.stringify(out);
+  })()`);
+  const ga = JSON.parse(groupAdd);
+  check('group header offers Add food', !ga.error && /Add food/.test(ga.headText || ''), groupAdd);
+  check('Add food opens a sheet named for the sitting',
+        ga.addOpen && /^Add food to /.test(ga.title || ''), groupAdd);
+  check('scoped sheet states the join target and time', /Joins .+ at .+/.test(ga.scope || ''), groupAdd);
+  check('estimate opens review with the sitting context',
+        ga.reviewOpen && /Adding to /.test(ga.scopeNote || ''), groupAdd);
+  check('scoped review action names the sitting',
+        /^Add to .+/.test(ga.primary || ''), groupAdd);
+  check('review pre-fills the sitting date and time',
+        ga.reviewDate === ga.expectedDate && ga.reviewTime === ga.expectedTime, groupAdd);
+  check('new scoped food saves into the same sitting',
+        ga.probeSaved === true && ga.joined === true, groupAdd);
+  check('group header grows by one food', ga.count === ga.beforeCount + 1 &&
+        (ga.headAfter || '').includes(ga.count + ' food'), groupAdd);
+  check('one-component row uses singular item',
+        /(^|· )1 item\b/.test(ga.probeMeta || '') && !/1 items/.test(ga.probeMeta || ''), groupAdd);
+
+  // ---- Save & add another food from the review sheet ----------------------
+  const another = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    const meal = (state.meals || []).find(m => m.description === 'grp-one');
+    const row = meal && document.querySelector('.meal[data-id="' + meal.id + '"]');
+    if (!row) return JSON.stringify({ error: 'no grp-one row' });
+    row.querySelector('[data-act="edit"]').click();
+    await wait(450);
+    const out = {
+      open: !document.getElementById('review-sheet').hidden,
+      primary: document.getElementById('btn-save-review-label').textContent,
+      another: !document.getElementById('btn-save-another').hidden,
+    };
+    document.getElementById('btn-save-another').click();
+    await wait(2600);
+    out.reviewClosed = document.getElementById('review-sheet').hidden;
+    out.addOpen = !document.getElementById('add-sheet').hidden;
+    out.title = document.getElementById('add-sheet-title').textContent;
+    out.scope = document.getElementById('add-scope').hidden ? '' : document.getElementById('add-scope').textContent;
+    if (out.addOpen) document.getElementById('btn-cancel-add').click();
+    await wait(300);
+    return JSON.stringify(out);
+  })()`);
+  const an = JSON.parse(another);
+  check('editing a saved food labels the action Save changes',
+        an.open && an.primary === 'Save changes', another);
+  check('review offers Save & add another food', an.another === true, another);
+  check('save & add another reopens a scoped Add sheet',
+        an.addOpen && an.reviewClosed && /^Add food to /.test(an.title || ''), another);
+  check('save & add another keeps the same sitting', /Joins .+ at .+/.test(an.scope || ''), another);
+
   // cleanup everything this section created
   await evalJson(`(async () => {
     const r = await fetch('/api/state').then(x=>x.json());
