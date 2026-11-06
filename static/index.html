@@ -107,11 +107,11 @@
     <div class="status-strip" id="status-strip"></div>
 
     <div class="section-head">
-      <h2>Meals</h2>
+      <h2>Food log</h2>
       <button class="ghost" id="btn-add-meal"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add</button>
     </div>
     <div id="meal-groups"></div>
-    <p class="empty" id="meals-empty" hidden>No meals logged yet. Tap the camera to start.</p>
+    <p class="empty" id="meals-empty" hidden>No foods logged yet. Tap the camera to start.</p>
   </section>
 
   <!-- ============================ TREND ============================ -->
@@ -161,6 +161,15 @@
           </select>
         </label>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>Food log</h3>
+      <label class="fld">Group foods logged within (minutes)
+        <input id="s-gap" type="number" inputmode="numeric" min="5" max="120" step="5">
+      </label>
+      <p class="hint">Foods logged within this window share one group, headed by
+        the hour they started. Changing it re-groups past days too.</p>
     </div>
 
     <div class="card">
@@ -252,7 +261,7 @@
 <div class="fab-wrap">
   <!-- Plus, not a camera: this opens the unified sheet (photo and/or label
        and/or description), so a camera glyph would misdescribe what it does. -->
-  <button class="fab" id="btn-add-meal-fab" aria-label="Add a meal">
+  <button class="fab" id="btn-add-meal-fab" aria-label="Add food">
     <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
       <path d="M12 5v14M5 12h14"/>
     </svg>
@@ -317,13 +326,13 @@
   </div>
 </div>
 
-<!-- ======================= UNIFIED ADD-MEAL SHEET =================== -->
+<!-- ======================= UNIFIED ADD-FOOD SHEET =================== -->
 <div class="sheet-backdrop" id="add-sheet" hidden>
   <div class="sheet">
     <div class="sheet-grab" title="Drag down or tap to close"></div>
-    <h3 id="add-sheet-title">Add a meal</h3>
-    <!-- Shown when the sheet was opened from a meal group on Today. The food
-         being estimated is an addition to that sitting, not a new meal. -->
+    <h3 id="add-sheet-title">Add food</h3>
+    <!-- Shown when the sheet was opened from a time group on Today. The food
+         being estimated joins that group instead of starting a new one. -->
     <p class="scope-banner" id="add-scope" hidden></p>
     <p class="hint" id="add-sheet-hint">Combine whatever you have — a photo of the plate, a photo of
       the Nutrition Facts panel, and a note on how much you ate. The more inputs,
@@ -404,22 +413,37 @@
       <p class="hint">Fiber is counted inside carbs, not on top of them.</p>
     </details>
 
-    <label class="fld">Meal
-      <select id="r-kind"><option value="auto">Auto (by time)</option><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
-      <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
-      <option value="other">Other</option></select>
-    </label>
     <p class="prov-line" id="r-prov"></p>
-    <!-- Duplicate the SAVED meal (including its photo) to today; useful for
-         repeating a past meal without moving the original. -->
+    <!-- Duplicate the SAVED food (including its photo) to today; useful for
+         repeating a past food without moving the original. -->
     <button class="ghost" id="btn-copy-meal" hidden
-      title="Copy the saved meal to today"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg>Copy this saved meal to today</button>
+      title="Copy this food to today"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg>Copy this food to today</button>
     <!-- Save this food, then immediately open a scoped Add sheet for the next
-         food in the same sitting. Keeps a multi-photo meal one flow. -->
+         food in the same group. Keeps a multi-photo meal one flow. -->
     <button class="ghost save-another" id="btn-save-another"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Save &amp; add another food</button>
     <div class="sheet-btns">
       <button class="ghost" id="btn-cancel-review">Cancel</button>
       <button class="primary" id="btn-save-review"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg><span id="btn-save-review-label">Add to log</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= COPY GROUP TO DAY ======================== -->
+<div class="sheet-backdrop" id="copy-group-sheet" hidden>
+  <div class="sheet">
+    <div class="sheet-grab" title="Drag down or tap to close"></div>
+    <h3>Copy to another day</h3>
+    <p class="hint" id="copy-group-hint"></p>
+    <label class="fld">Copy to
+      <input id="copy-date" type="date">
+    </label>
+    <div class="seg" id="copy-quick">
+      <button type="button" data-copy-day="today">Today</button>
+      <button type="button" data-copy-day="tomorrow">Tomorrow</button>
+    </div>
+    <div class="sheet-btns">
+      <button class="ghost" id="btn-cancel-copy">Cancel</button>
+      <button class="primary" id="btn-do-copy"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg>Copy foods</button>
     </div>
   </div>
 </div>
@@ -437,11 +461,6 @@
       <label class="fld">F (g)<input id="m-fat" type="number" inputmode="numeric"></label>
       <label class="fld">Fiber (g)<input id="m-fib" type="number" inputmode="numeric" placeholder="of carbs"></label>
     </div>
-    <label class="fld">Meal
-      <select id="m-kind"><option value="auto">Auto (by time)</option><option value="breakfast">Breakfast</option><option value="lunch">Lunch</option>
-      <option value="dinner">Dinner</option><option value="snack">Snack</option><option value="drink">Drink</option>
-      <option value="other">Other</option></select>
-    </label>
     <div class="sheet-btns">
       <button class="ghost" id="btn-cancel-manual">Cancel</button>
       <button class="primary" id="btn-save-manual"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg>Add</button>

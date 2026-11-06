@@ -334,15 +334,15 @@ function mealRowHtml(m) {
       <div class="meal-row" data-toggle="${m.id}">
         ${thumb}
         <div class="meal-info">
-          <div class="meal-desc">${esc(m.description || m.kind || 'Meal')}</div>
+          <div class="meal-desc">${esc(m.description || 'Food')}</div>
           <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} item${comps.length === 1 ? '' : 's'}` : ''}</div>
         </div>
         <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
         <div class="meal-actions">
-          <button class="icon-btn" data-act="edit" aria-label="Edit meal">
+          <button class="icon-btn" data-act="edit" aria-label="Edit food">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L20 8l-4-4L4 16v4z"/></svg>
           </button>
-          <button class="icon-btn" data-act="del" aria-label="Delete meal">
+          <button class="icon-btn" data-act="del" aria-label="Delete food">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13"/></svg>
           </button>
         </div>
@@ -368,6 +368,24 @@ function fmtTime(ts) {
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+// The group spine shows the hour food was started, not a meal category and not
+// the minute. Exact times stay on each food row.
+function fmtHour(ts) {
+  const d = new Date(ts * 1000);
+  if (is24h()) return String(d.getHours()).padStart(2, '0') + ':00';
+  const h = d.getHours();
+  return `${h % 12 || 12} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
+// Normally the hour is enough. When two clusters start in the same hour, the
+// repeated "12 PM" would be ambiguous, so those headers fall back to the exact
+// start time.
+function groupLabel(g) {
+  const hourOf = (ts) => new Date((+ts || 0) * 1000).getHours();
+  const sameHour = (state?.groups || []).filter(x => hourOf(x.start_ts) === hourOf(g.start_ts));
+  return sameHour.length > 1 ? fmtTime(g.start_ts) : fmtHour(g.start_ts);
+}
+
 function renderGroups(groups, meals) {
   const host = $('meal-groups');
   const byId = Object.fromEntries((meals || []).map(m => [m.id, m]));
@@ -375,17 +393,21 @@ function renderGroups(groups, meals) {
   if (!groups || !groups.length) { host.innerHTML = ''; return; }
   host.innerHTML = groups.map(g => {
     const rows = g.meal_ids.map(id => byId[id]).filter(Boolean).map(mealRowHtml).join('');
-    const t = fmtTime(g.start_ts);
-    // A group is the meal (the sitting); each record under it is one food.
-    // Calling the record count "items" collided with a food's components.
+    // Each group is a time cluster; the heading is its start hour. Calling the
+    // record count "items" collided with a food's components, so use "foods".
     const n = +g.count || 0;
+    const label = groupLabel(g);
     return `<section class="meal-group" data-group="${g.id}">
       <header class="group-head">
-        <h3>${esc(g.label)}</h3>
+        <h3>${esc(label)}</h3>
         <span class="group-kcal">${fmt(g.calories)}<small>kcal</small></span>
-        <span class="group-meta">${t} · ${n} food${n === 1 ? '' : 's'}</span>
-        <button class="ghost tiny group-add" data-add-food="${g.id}"
-          title="Add another food to ${esc(g.label)}"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add food</button>
+        <span class="group-meta">${n} food${n === 1 ? '' : 's'}</span>
+        <span class="group-acts">
+          <button class="ghost tiny group-add" data-add-food="${g.id}"
+            title="Add another food to ${esc(label)}"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Add food</button>
+          <button class="ghost tiny group-copy" data-copy-group="${g.id}"
+            title="Copy these foods to another day"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg>Copy</button>
+        </span>
       </header>
       <ul class="meal-list">${rows}</ul>
     </section>`;
@@ -400,14 +422,22 @@ const iconSvg = (name) =>
 
 // ------------------------------------------------------------- meal actions
 // "+ Add food" on a group header: compose the next food directly into that
-// sitting. This is the morning-coffee/dinner-side case without asking the user
-// to hunt for the pencil icon first.
+// time cluster. Copy opens a small sheet that duplicates the whole cluster on
+// another day.
 $('meal-groups').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-add-food]');
   if (!btn) return;
   const g = findGroup(btn.dataset.addFood);
   if (!g) return;
   openAddSheet(scopeForGroup(g));
+});
+
+$('meal-groups').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-copy-group]');
+  if (!btn) return;
+  const g = findGroup(btn.dataset.copyGroup);
+  if (!g) return;
+  openCopyGroupSheet(g);
 });
 
 $('meal-groups').addEventListener('click', async (e) => {
@@ -419,13 +449,13 @@ $('meal-groups').addEventListener('click', async (e) => {
   if (!meal) return;
 
   if (btn.dataset.act === 'del') {
-    if (!confirm(`Delete "${meal.description || 'this meal'}"?`)) return;
+    if (!confirm(`Delete "${meal.description || 'this food'}"?`)) return;
     try {
       // refresh() reassigns `state` itself; assigning its (undefined) return
       // value here used to blank state and break Edit/Delete/Settings.
       await api(`meals/${id}`, { method: 'DELETE' });
       await refresh();
-      toast('Meal deleted');
+      toast('Food deleted');
     } catch (err) { toast(err.message, true); }
     return;
   }
@@ -435,7 +465,7 @@ $('meal-groups').addEventListener('click', async (e) => {
       estimate: {
         description: meal.description, calories: meal.calories,
         protein: meal.protein, carbs: meal.carbs, fat: meal.fat,
-        items: meal.items || [], ts: meal.ts, date: meal.date, kind: meal.kind,
+        items: meal.items || [], ts: meal.ts, date: meal.date,
       },
       provider: meal.provider, model: meal.model, editingId: id,
       // Carry the saved photo list through this path too; otherwise opening a
@@ -464,8 +494,8 @@ $('meal-groups').addEventListener('click', async (e) => {
 // ------------------------------------------------------------ review sheet
 let compItems = [];        // live editable components for the open meal
 // When the Add sheet is opened from a group on Today ("+ Add food"), this holds
-// the target sitting so the new food is saved into it instead of becoming a
-// separate meal. Null means a normal, unscoped Add.
+// the target group so the new food is saved into it instead of becoming a
+// separate entry. Null means a normal, unscoped Add.
 let addTarget = null;
 // The same target while the review sheet is open. Kept separately so closing
 // one sheet does not silently retarget the other.
@@ -476,13 +506,13 @@ function hmOfTs(ts) {
   return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 
-// A sitting on Today, expressed as the date/time a new food must carry to join
-// it. Using the group's start keeps the derived 45-minute clustering intact
+// A time cluster on Today, expressed as the date/time a new food must carry to
+// join it. Using the cluster's start keeps the derived gap grouping intact
 // without storing a group id anywhere.
 function scopeForGroup(g) {
   return {
     groupId: g.id,
-    label: g.label,
+    label: groupLabel(g),
     start_ts: g.start_ts,
     date: state?.date || todayISO(),
     time: hmOfTs(g.start_ts),
@@ -497,6 +527,69 @@ function findGroupForMeal(mealId) {
   return (state?.groups || []).find(g =>
     (g.meal_ids || []).some(id => String(id) === String(mealId))) || null;
 }
+
+// ------------------------------------------------------- copy group to day
+let copySourceGroup = null;
+
+function isoOf(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// Copying yesterday's breakfast to today is the common case; copying today's
+// food somewhere should default forward, never onto itself.
+function defaultCopyDate(sourceDate) {
+  const today = todayISO();
+  if (sourceDate && sourceDate < today) return today;
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return isoOf(d);
+}
+
+function fmtDay(iso) {
+  return new Date(iso + 'T12:00:00')
+    .toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function openCopyGroupSheet(g) {
+  copySourceGroup = g;
+  const source = state?.date || todayISO();
+  const n = +g.count || (g.meal_ids || []).length;
+  $('copy-group-hint').textContent =
+    `Copy ${n} food${n === 1 ? '' : 's'} from ${fmtDay(source)} to another day. ` +
+    'Photos and components come along.';
+  $('copy-date').value = defaultCopyDate(source);
+  $('copy-group-sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+$('btn-cancel-copy').addEventListener('click', closeSheets);
+$('copy-group-sheet').addEventListener('click', (e) => {
+  if (e.target.id === 'copy-group-sheet') closeSheets();
+});
+$('copy-quick').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-copy-day]');
+  if (!b) return;
+  const d = new Date();
+  if (b.dataset.copyDay === 'tomorrow') d.setDate(d.getDate() + 1);
+  $('copy-date').value = isoOf(d);
+});
+
+guardClick('btn-do-copy', async () => {
+  const g = copySourceGroup;
+  if (!g) return;
+  const target = $('copy-date').value;
+  const source = state?.date || todayISO();
+  if (!target) { toast('Choose a day to copy to', true); return; }
+  if (target === source) { toast('Choose a different day', true); return; }
+  try {
+    const res = await api('meals/copy-group', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meal_ids: g.meal_ids, date: target }),
+    });
+    closeSheets();
+    toast(`Copied ${res.copied} food${res.copied === 1 ? '' : 's'} to ${fmtDay(target)}`);
+  } catch (err) { toast(err.message, true); }
+});
 
 function nowHM() { const d = new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function todayISO() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
@@ -695,7 +788,7 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   const scopeEl = $('r-scope');
   if (scopeEl) {
     if (reviewScope) {
-      scopeEl.textContent = `Adding to ${reviewScope.label} · ${fmtTime(reviewScope.start_ts)}`;
+      scopeEl.textContent = `Adding to ${reviewScope.label}`;
       scopeEl.hidden = false;
     } else {
       scopeEl.textContent = '';
@@ -719,16 +812,14 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   $('r-fat').value = Math.round(e.fat || 0);
 
   // Date/time default to now, the meal's stored time when editing, or the
-  // target sitting's time when adding another food to it.
+  // target group's time when adding another food to it.
   $('r-date').value = editingId && e.date ? e.date
     : (reviewScope ? reviewScope.date : (viewDate || todayISO()));
   $('r-time').value = editingId && e.ts ? hmOfTs(e.ts)
     : (reviewScope ? reviewScope.time : nowHM());
-  // Never inherit the previous meal's select value.
-  $('r-kind').value = editingId && e.kind ? e.kind : 'auto';
 
   // The primary action names what will happen. "Add to log" while editing was a
-  // lie (it PATCHes) and hid which sitting a scoped add targets.
+  // lie (it PATCHes) and hid which group a scoped add targets.
   const saveLabel = editingId ? 'Save changes'
     : (reviewScope ? `Add to ${reviewScope.label}` : 'Add to log');
   if ($('btn-save-review-label')) $('btn-save-review-label').textContent = saveLabel;
@@ -859,7 +950,7 @@ $('r-items').addEventListener('click', (ev) => {
 $('btn-rescan').addEventListener('click', async () => {
   if (!reviewPhotos.length) { toast('No photo to rescan', true); return; }
   const keep = { date: $('r-date').value, time: $('r-time').value,
-                 kind: $('r-kind').value, editing: $('review-sheet').dataset.editing,
+                 editing: $('review-sheet').dataset.editing,
                  preview: $('review-img').src || null,
                  scope: reviewScope };
   loading(true, 'Re-scanning photo…');
@@ -878,7 +969,6 @@ $('btn-rescan').addEventListener('click', async () => {
     // openReview re-derives these; put back whatever the user had chosen.
     if (keep.date) $('r-date').value = keep.date;
     if (keep.time) $('r-time').value = keep.time;
-    if (keep.kind) $('r-kind').value = keep.kind;
     toast('Re-scanned — check the numbers');
   } catch (err) {
     toast(err.message, true);
@@ -887,7 +977,7 @@ $('btn-rescan').addEventListener('click', async () => {
   }
 });
 
-// Duplicate the saved meal (including a private copy of its photo) to today.
+// Duplicate the saved food (including a private copy of its photo) to today.
 // The copy is created server-side, so the original row is never moved.
 $('btn-copy-meal').addEventListener('click', async () => {
   const editing = Number($('review-sheet').dataset.editing);
@@ -925,6 +1015,8 @@ function closeSheets() {
   $('review-sheet').dataset.source = '';
   $('manual-sheet').hidden = true;
   $('add-sheet').hidden = true;
+  $('copy-group-sheet').hidden = true;
+  copySourceGroup = null;
   addTarget = null;
   reviewScope = null;
   if ($('add-scope')) $('add-scope').hidden = true;
@@ -946,6 +1038,7 @@ const SHEET_CLOSERS = {
   'review-sheet': () => closeSheets(),
   'manual-sheet': () => closeSheets(),
   'health-guide-sheet': () => closeSheets(),
+  'copy-group-sheet': () => closeSheets(),
 };
 let grabDrag = null;
 
@@ -1001,7 +1094,7 @@ let reviewSaveBusy = false;
 
 // Shared by "Add to log"/"Save changes" and "Save & add another food". The
 // second path saves the current food, then reopens the Add sheet scoped to the
-// sitting it landed in, so a multi-photo meal never needs a trip back to Today.
+// group it landed in, so a multi-photo meal never needs a trip back to Today.
 async function saveReview({ addAnother = false } = {}) {
   if (reviewSaveBusy) return;
   reviewSaveBusy = true;
@@ -1013,7 +1106,6 @@ async function saveReview({ addAnother = false } = {}) {
     const scope = reviewScope;
     const payload = {
       description: $('r-desc').value.trim(),
-      kind: $('r-kind').value,
       date: $('r-date').value || (scope && scope.date) || viewDate || undefined,
       time: $('r-time').value || (scope && scope.time) || undefined,
       source: $('review-sheet').dataset.source || 'photo',
@@ -1063,7 +1155,7 @@ async function saveReview({ addAnother = false } = {}) {
         const group = savedId ? findGroupForMeal(savedId) : null;
         if (group) {
           openAddSheet(scopeForGroup(group));
-          toast(`Saved — add the next food to ${group.label}`);
+          toast(`Saved — add the next food to ${groupLabel(group)}`);
         } else {
           openAddSheet();
           toast('Saved — add another food');
@@ -1097,7 +1189,6 @@ guardClick('btn-save-manual', async () => {
     carbs: Number($('m-car').value) || 0,
     fat: Number($('m-fat').value) || 0,
     fiber: Number($('m-fib') ? $('m-fib').value : 0) || 0,
-    kind: scope ? 'auto' : $('m-kind').value,
     source: 'manual',
     date: scope ? scope.date : (viewDate || undefined),
     time: scope ? scope.time : undefined,
@@ -1200,18 +1291,18 @@ function openAddSheet(scope = null) {
   stagedForSave = [];
 
   const title = $('add-sheet-title');
-  if (title) title.textContent = scope ? `Add food to ${scope.label}` : 'Add a meal';
+  if (title) title.textContent = scope ? `Add food to ${scope.label}` : 'Add food';
   const banner = $('add-scope');
   if (banner) {
     banner.hidden = !scope;
     banner.textContent = scope
-      ? `Joins ${scope.label} at ${fmtTime(scope.start_ts)} — saved as one food in that meal, not a new meal.`
+      ? `Joins the ${scope.label} group — saved as another food there.`
       : '';
   }
   const hint = $('add-sheet-hint');
   if (hint) {
     hint.textContent = scope
-      ? 'Photograph this food on its own — plus its Nutrition Facts panel if it has one — or describe it. It joins the meal above.'
+      ? 'Photograph this food on its own — plus its Nutrition Facts panel if it has one — or describe it. It joins the group above.'
       : 'Combine whatever you have — a photo of the plate, a photo of the Nutrition Facts panel, and a note on how much you ate. The more inputs, the better the estimate.';
   }
 
@@ -1291,14 +1382,13 @@ $('btn-estimate-meal').addEventListener('click', async () => {
 $('btn-enter-values').addEventListener('click', () => {
   $('add-sheet').hidden = true;
   ['m-desc', 'm-cal', 'm-pro', 'm-car', 'm-fat'].forEach(id => { $(id).value = ''; });
-  $('m-kind').value = 'auto';   // don't inherit the previous entry's meal type
   if ($('manual-title')) {
     $('manual-title').textContent = addTarget ? `Add food to ${addTarget.label}` : 'Log manually';
   }
   if ($('manual-scope')) {
     $('manual-scope').hidden = !addTarget;
     $('manual-scope').textContent = addTarget
-      ? `Joins ${addTarget.label} at ${fmtTime(addTarget.start_ts)} — saved as one food in that meal.`
+      ? `Joins the ${addTarget.label} group — saved as another food there.`
       : '';
   }
   $('manual-sheet').hidden = false;
@@ -1547,6 +1637,7 @@ function renderSettings() {
   const imp = U.imperial;
   $('s-units').value = imp ? 'imperial' : 'metric';
   if ($('s-timefmt')) $('s-timefmt').value = s.time_format === '24h' ? '24h' : '12h';
+  if ($('s-gap')) $('s-gap').value = s.meal_gap_minutes ?? 30;
   $('s-sex').value = s.sex || 'male';
   $('s-age').value = s.age ?? 35;
 
@@ -2100,6 +2191,11 @@ $('btn-prov-delete')?.addEventListener('click', async () => {
 
 $('btn-save').addEventListener('click', async () => {
   const imp = U.imperial;
+  const gap = Math.round(Number($('s-gap') ? $('s-gap').value : 30));
+  if (!(gap >= 5 && gap <= 120)) {
+    toast('Grouping window must be 5–120 minutes', true);
+    return;
+  }
   // Convert display-unit inputs back to canonical metric before sending.
   const height_cm = imp
     ? U.heightToCm($('s-height-ft').value, $('s-height-in').value)
@@ -2117,6 +2213,7 @@ $('btn-save').addEventListener('click', async () => {
     auto_adapt: $('s-autoadapt').checked,
     calibrate_estimates: $('s-calibrate').checked,
     time_format: $('s-timefmt') ? $('s-timefmt').value : undefined,
+    meal_gap_minutes: gap,
     photo_retention_months: Number($('s-photo-retention').value),
   };
   const tgt = Number($('s-target').value);

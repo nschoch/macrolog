@@ -104,7 +104,7 @@ DEFAULT_SETTINGS = {
     "auto_adapt": True,
     "calibrate_estimates": True,
     "time_format": "12h",            # 12h | 24h (display only; storage is epochs)
-    "meal_gap_minutes": 45,          # meals logged within this gap = one sitting
+    "meal_gap_minutes": 30,          # foods logged within this gap share a group
     # Meal photos are files, not DB blobs. 0 keeps them forever; otherwise the
     # maintenance sweep deletes photos older than this many months (macros stay).
     "photo_retention_months": 12,
@@ -288,7 +288,7 @@ TARGET_MIN_KCAL, TARGET_MAX_KCAL = 800, 10000
 _NUMERIC_SETTINGS = {
     "age": (14, 100), "height_cm": (100, 250), "activity_factor": (1.0, 2.5),
     "weekly_rate_kg": (-1.5, 1.0), "protein_g_per_kg": (0.5, 4.0),
-    "fat_calorie_pct": (0.1, 0.6), "meal_gap_minutes": (5, 600),
+    "fat_calorie_pct": (0.1, 0.6), "meal_gap_minutes": (5, 120),
     "calorie_target": (TARGET_MIN_KCAL, TARGET_MAX_KCAL),
     "starting_weight_kg": (20, 700),
 }
@@ -429,10 +429,11 @@ class Api:
                      "configured": (p.get("kind") == "stub") or (_provider_ready(p) and not p.get("unreachable"))}
                     for p in effective]
         dicts = [_meal_dict(m, item_map.get(m["id"], [])) for m in meals]
+        # Grouping is pure time proximity and display-only; the gap is per-user.
+        gap = min(120, max(5, int(s.get("meal_gap_minutes") or 30)))
         return 200, {
             "date": t, "meals": dicts,
-            # Derived eatings (see group_meals); gap is user-tunable.
-            "groups": group_meals(dicts, int(s.get("meal_gap_minutes") or 45), tz=tz),
+            "groups": group_meals(dicts, gap),
             "consumed": consumed, "targets": targets, "trend": trend,
             "settings": _public_settings(s), "providers": providers,
             "health_export": _health_export_status(owner),
@@ -677,8 +678,8 @@ class Api:
         final_path = _store_photos([_promote_photo(x) for x in tmp_list])
         mid = db.add_meal(
             date=d, ts=ts,
-            # "auto" = user declined to name it; grouping decides from time, so
-            # persist a neutral value that won't override the derived label.
+            # `kind` is legacy metadata (Apple Health only); the UI no longer
+            # asks for a meal category, so new entries default to "other".
             kind=kind,
             description=meal["description"], calories=meal["calories"],
             protein=meal["protein"], carbs=meal["carbs"], fat=meal["fat"],
@@ -717,7 +718,7 @@ class Api:
         except ValueError:
             return 400, {"error": "invalid date (use YYYY-MM-DD)"}
         # No time supplied -> keep the original's clock time on the new date, so
-        # a copied lunch still groups as lunch.
+        # the copy lands in the same hour and time cluster.
         ts = _parse_when({"date": d, "time": body.get("time")},
                          default_date=d, fallback_ts=old["ts"], tz=tz)
         items = db.items_for_meal(mid)
@@ -734,6 +735,73 @@ class Api:
         _maybe_adapt(get_settings(owner), owner=owner)
         return 201, {"id": new_id, "copied_from": mid, "date": d,
                      **_day_summary(d, owner)}
+
+    @staticmethod
+    def POST_copy_group(h, q, body):
+        """Copy a whole time-cluster of foods to another day.
+
+        Groups are derived on the client, so it sends the member meal ids. Every
+        food keeps its clock time-of-day on the target date (and therefore its
+        hour and cluster), gets independent copies of its photos, and leaves the
+        source untouched. One target date per call.
+        """
+        owner = getattr(h, "owner", "default")
+        raw_ids = body.get("meal_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return 400, {"error": "meal_ids must be a non-empty list"}
+        if len(raw_ids) > 50:
+            return 400, {"error": "a group is limited to 50 foods"}
+        ids: list[int] = []
+        for v in raw_ids:
+            try:
+                mid = int(v)
+            except (TypeError, ValueError):
+                return 400, {"error": "invalid meal id"}
+            if mid not in ids:
+                ids.append(mid)
+
+        tz = h._tz()
+        raw_date = str(body.get("date") or "")[:10]
+        try:
+            target = date.fromisoformat(raw_date).isoformat()
+        except ValueError:
+            return 400, {"error": "invalid date (use YYYY-MM-DD)"}
+
+        sources = []
+        for mid in ids:
+            row = db.get_meal(mid, owner)
+            if not row:
+                return 404, {"error": "meal not found"}
+            sources.append(row)
+        source_dates = {row["date"] for row in sources}
+        if len(source_dates) != 1:
+            return 400, {"error": "all foods must come from the same day"}
+        source_date = source_dates.pop()
+        if target == source_date:
+            return 400, {"error": "choose a different day to copy to"}
+
+        copied = []
+        for old in sources:
+            # Same clock time-of-day on the target date; _parse_when handles DST.
+            ts = _parse_when({"date": target}, default_date=target,
+                             fallback_ts=old["ts"], tz=tz)
+            items = db.items_for_meal(old["id"])
+            photo = _copy_photos(old["photo_path"], target)
+            new_id = db.add_meal(
+                date=target, ts=ts, kind=old["kind"],
+                description=old["description"], calories=old["calories"],
+                protein=old["protein"], carbs=old["carbs"], fat=old["fat"],
+                fiber=old["fiber"], confidence=old["confidence"],
+                photo_path=photo, source=old["source"],
+                provider=old["provider"], model=old["model"],
+                raw_json=old["raw_json"], owner=owner)
+            if items:
+                db.replace_meal_items(new_id, items)
+            copied.append(new_id)
+        _maybe_adapt(get_settings(owner), owner=owner)
+        return 201, {"ids": copied, "copied": len(copied),
+                     "from_date": source_date, "date": target,
+                     **_day_summary(target, owner)}
 
     @staticmethod
     def PATCH_meal(h, q, body, meal_id):
@@ -1676,26 +1744,17 @@ def _health_export_status(owner: str) -> dict:
     }
 
 
-# Clock windows used to NAME an auto-detected sitting. A meal's start time picks
-# the label; consecutive meals that land in the same window get numbered, so a
-# late snack after dinner reads "Dinner 2" rather than silently reusing Dinner.
-MEAL_WINDOWS = (("breakfast", 0, 10.5), ("lunch", 10.5, 15.0),
-                ("dinner", 15.0, 21.0), ("snack", 21.0, 24.0))
+def group_meals(meals: list[dict], gap_minutes: int = 30) -> list[dict]:
+    """Cluster a day's meals into food groups by time proximity.
 
+    Deliberately derived, not stored: the user logs one food at a time (a photo
+    per course, or a plate now and its label later), and consecutive logs within
+    `gap_minutes` belong to the same eating occasion. The window is per-user and
+    exposes no meal *category* -- the client renders the group's start hour as
+    its spine, so a late lunch is never mislabelled "Dinner".
 
-def group_meals(meals: list[dict], gap_minutes: int = 45, tz=None) -> list[dict]:
-    """Cluster a day's meals into eatings by time proximity.
-
-    Deliberately derived, not stored: the user logs one dish at a time (a photo
-    per course, or a plate now and its label later), so requiring them to pick
-    "Lunch" each time is friction that also produces wrong groupings. Two
-    records within `gap_minutes` of each other are treated as one sitting —
-    generous enough that a restaurant meal spanning courses still groups, while
-    a mid-afternoon snack stays separate.
-
-    Returns [{"id", "start_ts", "meal_ids", "label", "calories", ...}] ordered
-    through the day. `kind` from any record only overrides when the user set it
-    explicitly (auto|None means "we decide").
+    Returns [{"id", "start_ts", "meal_ids", "count", "calories", ...}] ordered
+    through the day.
     """
     if not meals:
         return []
@@ -1709,26 +1768,10 @@ def group_meals(meals: list[dict], gap_minutes: int = 45, tz=None) -> list[dict]
             clusters.append([cur])
 
     out = []
-    seen_labels: dict[str, int] = {}
     for idx, cluster in enumerate(clusters, start=1):
         start_ts = min((m.get("ts") or 0) for m in cluster)
-        # Interpret the epoch in the household zone so Breakfast/Lunch/Dinner
-        # boundaries match the user's day, not the UTC host clock.
-        _zone = tz or APP_TZ
-        _local = (datetime.fromtimestamp(start_ts, _zone) if _zone
-                  else datetime.fromtimestamp(start_ts))
-        hour = _local.hour + _local.minute / 60.0
-        name = next((lbl for lbl, lo, hi in MEAL_WINDOWS if lo <= hour < hi),
-                    "snack")
-        explicit = {m.get("kind") for m in cluster
-                    if m.get("kind") and m["kind"] not in ("auto", "other")}
-        if len(explicit) == 1:              # user already named this sitting
-            name = explicit.pop()
-        seen_labels[name] = seen_labels.get(name, 0) + 1
-        label = name if seen_labels[name] == 1 else f"{name} {seen_labels[name]}"
         out.append({
             "id": idx,
-            "label": label.capitalize(),
             "start_ts": start_ts,
             "meal_ids": [m["id"] for m in cluster],
             "count": len(cluster),
@@ -2582,6 +2625,8 @@ class Handler(BaseHTTPRequestHandler):
             elif resource == "meals" and tail and len(parts) > 3 \
                     and parts[3] == "copy" and verb == "POST":
                 st, pl = Api.POST_copy_meal(self, q, body, tail)
+            elif resource == "meals" and tail == "copy-group" and verb == "POST":
+                st, pl = Api.POST_copy_group(self, q, body)
             elif resource == "meals" and verb == "POST":
                 st, pl = Api.POST_meals(self, q, body)
             elif resource == "meals" and tail and verb == "GET":

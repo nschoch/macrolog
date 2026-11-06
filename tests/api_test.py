@@ -443,7 +443,7 @@ if temps:
         check("first photo served as image bytes", img_ok)
         req(f"/api/meals/{mp}", "DELETE")
 
-# 21. auto meal grouping
+# 21. time-proximity grouping
 def mk(desc, mins_ago, kcal=100):
     """Log a meal at a specific offset from now so cluster gaps are exact."""
     import datetime as _d4
@@ -453,19 +453,23 @@ def mk(desc, mins_ago, kcal=100):
         "date": _d4.date.today().isoformat(),
         "time": t.strftime("%H:%M")})
 
-_, rA = mk("gA", 5); _, rB = mk("gB", 2)     # 3 min apart -> one sitting
-_, rC = mk("gC", 200)                        # hours later -> its own sitting
-idsAB = None
+_, rA = mk("gA", 5); _, rB = mk("gB", 2)     # 3 min apart -> one group
+_, rC = mk("gC", 200)                        # hours later -> its own group
 st, gs = req("/api/state")
 byDesc = {m["description"]: m["id"] for m in gs["meals"]}
 wantAB = {byDesc.get("gA"), byDesc.get("gB")}
 groups = gs.get("groups") or []
-names = [g["label"] for g in groups]
-check("state includes derived groups", len(groups) >= 2, str(names))
+summary = [(g["count"], g["start_ts"]) for g in groups]
+check("state includes derived groups", len(groups) >= 2, str(summary))
+check("default grouping window is 30 minutes",
+      gs.get("settings", {}).get("meal_gap_minutes") == 30,
+      str(gs.get("settings", {}).get("meal_gap_minutes")))
+check("groups expose no meal-category label",
+      all("label" not in g for g in groups), str(groups[:1]))
 # Assert on OUR two meals specifically — other checks leave meals logged near
 # "now", so counting group size would be flaky; membership is what matters.
 pair = next((g for g in groups if wantAB <= set(g["meal_ids"])), None)
-check("close-in-time meals clustered together", pair is not None, str(names))
+check("close-in-time meals clustered together", pair is not None, str(summary))
 if pair:
     both = wantAB <= set(pair["meal_ids"])
     check("cluster contains both nearby meals", both, str(sorted(wantAB)))
@@ -473,14 +477,83 @@ if pair:
     check("cluster calories cover its members",
           pair["calories"] >= sum(int(m["calories"]) for m in mine) - 1,
           f'{pair["calories"]} vs {sum(int(m["calories"]) for m in mine)}')
+    check("cluster starts at its earliest food",
+          pair["start_ts"] == min(m["ts"] for m in mine), str(pair["start_ts"]))
 gC_id = byDesc.get("gC")
 solo = [g for g in groups if gC_id in g["meal_ids"]]
 check("far-apart meal is its own group", len(solo) == 1,
-      str([(g["label"], g["count"]) for g in groups]))
-check("group labels are time-derived strings", all(isinstance(g["label"], str) and g["label"] for g in groups))
+      str([(g["count"], g["start_ts"]) for g in groups]))
 for m in gs["meals"]:
     if m["description"].startswith("g"):
         req(f"/api/meals/{m['id']}", "DELETE")
+
+# The window is per-user and retroactive: two foods 40 minutes apart are two
+# groups at the default 30, then one group when the setting is raised to 60.
+GAP_DAY = "2026-01-16"
+for hm, desc in (("10:00", "gapA"), ("10:40", "gapB")):
+    st, out = req("/api/meals", "POST", {"description": desc, "calories": 100,
+        "date": GAP_DAY, "time": hm, "source": "manual"})
+    assert st == 201, f"gap seed failed: {st} {out}"
+st, sd = req("/api/state?date=" + GAP_DAY)
+ids = [m["id"] for m in sd.get("meals", []) if m["description"].startswith("gap")]
+check("40-minute foods are separate at the default window",
+      len(sd.get("groups") or []) == 2 and all(
+          not set(ids) <= set(g["meal_ids"]) for g in sd["groups"]),
+      str([(g["count"], g["start_ts"]) for g in sd.get("groups") or []]))
+st, _ = req("/api/settings", "PUT", {"meal_gap_minutes": 60})
+check("grouping window can be raised", st == 200, str(st))
+st, sd = req("/api/state?date=" + GAP_DAY)
+check("raising the window merges the 40-minute foods",
+      len(sd.get("groups") or []) == 1 and set(ids) <= set(sd["groups"][0]["meal_ids"]),
+      str([(g["count"], g["start_ts"]) for g in sd.get("groups") or []]))
+st, _ = req("/api/settings", "PUT", {"meal_gap_minutes": 30})
+for mid in ids:
+    req(f"/api/meals/{mid}", "DELETE")
+
+# 22. copy a whole group to another day
+COPY_FROM, COPY_TO = "2026-01-16", "2026-01-17"
+copy_ids = []
+for hm, desc in (("08:10", "group copy milk"), ("08:25", "group copy toast")):
+    st, out = req("/api/meals", "POST", {"description": desc, "calories": 120,
+        "protein": 6, "carbs": 12, "fat": 4, "date": COPY_FROM, "time": hm,
+        "source": "manual", "items": [
+            {"name": desc + " component", "grams": 100, "calories": 120,
+             "protein": 6, "carbs": 12, "fat": 4}]})
+    assert st == 201, f"copy seed failed: {st} {out}"
+    copy_ids.append(out["id"])
+st, sd = req("/api/state?date=" + COPY_FROM)
+src_group = next(g for g in sd["groups"] if set(copy_ids) <= set(g["meal_ids"]))
+st, cp = req("/api/meals/copy-group", "POST",
+             {"meal_ids": src_group["meal_ids"], "date": COPY_TO})
+check("copy group -> 201 with both foods",
+      st == 201 and cp.get("copied") == 2 and len(cp.get("ids") or []) == 2, str(cp)[:160])
+st, dst = req("/api/state?date=" + COPY_TO)
+copied = [m for m in dst.get("meals", []) if m["description"].startswith("group copy")]
+check("copied group lands on the target day", len(copied) == 2,
+      str([(m["description"], m["date"]) for m in copied]))
+import datetime as _dg
+from zoneinfo import ZoneInfo as _Zone
+DG = _Zone("America/Los_Angeles")
+check("copied foods keep their clock times",
+      sorted(_dg.datetime.fromtimestamp(m["ts"], DG).strftime("%H:%M") for m in copied)
+      == ["08:10", "08:25"],
+      str([_dg.datetime.fromtimestamp(m["ts"], DG).strftime("%H:%M") for m in copied]))
+check("copied foods keep their components",
+      all((m.get("items") or []) and m["items"][0]["name"].endswith("component")
+          for m in copied), str([m.get("items") for m in copied]))
+st, again = req("/api/meals/copy-group", "POST",
+                {"meal_ids": src_group["meal_ids"], "date": COPY_FROM})
+check("copy group refuses the source date", st == 400, str(again))
+st, bad = req("/api/meals/copy-group", "POST", {"meal_ids": [], "date": COPY_TO})
+check("copy group refuses an empty group", st == 400, str(bad))
+st, sd = req("/api/state?date=" + COPY_FROM)
+check("copy leaves the source untouched",
+      all(any(m["id"] == mid for m in sd["meals"]) for mid in copy_ids))
+for m in dst.get("meals", []):
+    if m["description"].startswith("group copy"):
+        req(f"/api/meals/{m['id']}", "DELETE")
+for mid in copy_ids:
+    req(f"/api/meals/{mid}", "DELETE")
 
 # 23. last_weight drives the weight-dock prefill + staleness nudge.
 import datetime as _dt5
@@ -609,12 +682,16 @@ for mid, hm in made:
 check("stored epoch equals the wall-clock time the user typed",
       offsets == ["07:25", "12:35", "19:10"], str(offsets))
 
-# Grouping follows the user's clock, which was the visible symptom.
-groups = {mid: next((g["label"] for g in sd.get("groups", []) if mid in g["meal_ids"]), None)
+# Time proximity is zone-independent (it compares epochs), and there is no
+# meal-category label to get wrong. Far-apart foods are separate groups whose
+# start is the earliest food.
+groups = {mid: next((g for g in sd.get("groups", []) if mid in g["meal_ids"]), None)
           for mid, _ in made}
-check("07:25 groups as Breakfast", groups.get(made[0][0]) == "Breakfast", str(groups))
-check("12:35 groups as Lunch", groups.get(made[1][0]) == "Lunch", str(groups))
-check("19:10 groups as Dinner", groups.get(made[2][0]) == "Dinner", str(groups))
+check("each far-apart food is its own group",
+      all(g and g.get("count") == 1 for g in groups.values()), str(groups.keys()))
+check("group start is the earliest food's timestamp",
+      all(g and g["start_ts"] == byid[mid]["ts"] for mid, g in groups.items()),
+      str([(m, g and g["start_ts"]) for m, g in groups.items()]))
 
 # The same rows read from another zone must shift by 8h, proving the zone is
 # per-request rather than baked into the stored data.

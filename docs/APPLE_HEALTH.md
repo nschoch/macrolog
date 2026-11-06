@@ -78,7 +78,7 @@ The backfill `/health/pending` endpoint excludes confirmed days automatically.
       "totals": {"calories": 1950, "protein": 144, "carbs": 200,
                   "fat": 54, "fiber": 27},
       "meals": [
-        {"time": "12:35", "timestamp": 1793427300, "kind": "lunch",
+        {"time": "12:35", "timestamp": 1793427300, "kind": "other",
          "description": "chicken rice bowl", "calories": 620,
          "protein": 45, "carbs": 70, "fat": 18, "fiber": 6, "items": []}
       ],
@@ -95,7 +95,9 @@ The backfill `/health/pending` endpoint excludes confirmed days automatically.
 ```
 
 The endpoint caps one response at 366 days (`?limit=...`). For per-meal samples,
-repeat over `meals` and use each meal's `timestamp`/`time`.
+repeat over `meals` and use each meal's `timestamp`/`time`. The `kind` field is
+legacy metadata: the app no longer asks for a meal category, so new entries
+report `other`.
 
 ## Notes
 

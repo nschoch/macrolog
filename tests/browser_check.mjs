@@ -473,7 +473,7 @@ try {
     return m ? {id:m.id, n:m.photos.length} : null })()`);
   check('meal stored with both photos', !!twoShot && twoShot.n === 2, JSON.stringify(twoShot));
 
-  // ---- Auto grouping: two nearby logs should form one sitting -------------
+  // ---- Time grouping: two nearby logs share one cluster -------------------
   await evalJson(`(async () => {
     const post = (desc, mins) => { const d = new Date(Date.now() - mins*60000);
       const hh = String(d.getHours()).padStart(2,'0'), mm = String(d.getMinutes()).padStart(2,'0');
@@ -489,11 +489,15 @@ try {
     joined: (state.groups||[]).some(g => {
       const names = g.meal_ids.map(id => (state.meals.find(m=>m.id===id)||{}).description);
       return names.includes('grp-one') && names.includes('grp-two'); })}))()`);
-  check('nearby meals render inside one sitting group', grouped.joined === true,
+  check('nearby foods render inside one time group', grouped.joined === true,
         JSON.stringify(grouped.heads));
-  check('group headers show derived labels', grouped.heads.length >= 1, JSON.stringify(grouped.heads));
+  check('group headings are hours, not meal categories',
+        grouped.heads.length >= 1 && grouped.heads.every(h =>
+          (/^(?:\d{1,2}(?::\d{2})? ?(?:AM|PM)|\d{2}:00)$/).test(h) &&
+          !/breakfast|lunch|dinner|snack|drink/i.test(h)),
+        JSON.stringify(grouped.heads));
 
-  // ---- Group-as-meal: add another food straight into the sitting ----------
+  // ---- Group add: add another food straight into the cluster --------------
   const groupAdd = await evalJson(`(async () => {
     const wait = (ms) => new Promise(r => setTimeout(r, ms));
     viewDate = '';
@@ -545,16 +549,16 @@ try {
   })()`);
   const ga = JSON.parse(groupAdd);
   check('group header offers Add food', !ga.error && /Add food/.test(ga.headText || ''), groupAdd);
-  check('Add food opens a sheet named for the sitting',
+  check('Add food opens a sheet named for the group',
         ga.addOpen && /^Add food to /.test(ga.title || ''), groupAdd);
-  check('scoped sheet states the join target and time', /Joins .+ at .+/.test(ga.scope || ''), groupAdd);
-  check('estimate opens review with the sitting context',
+  check('scoped sheet states the join target', /Joins the .+ group/.test(ga.scope || ''), groupAdd);
+  check('estimate opens review with the group context',
         ga.reviewOpen && /Adding to /.test(ga.scopeNote || ''), groupAdd);
-  check('scoped review action names the sitting',
+  check('scoped review action names the group',
         /^Add to .+/.test(ga.primary || ''), groupAdd);
-  check('review pre-fills the sitting date and time',
+  check('review pre-fills the group date and time',
         ga.reviewDate === ga.expectedDate && ga.reviewTime === ga.expectedTime, groupAdd);
-  check('new scoped food saves into the same sitting',
+  check('new scoped food saves into the same group',
         ga.probeSaved === true && ga.joined === true, groupAdd);
   check('group header grows by one food', ga.count === ga.beforeCount + 1 &&
         (ga.headAfter || '').includes(ga.count + ' food'), groupAdd);
@@ -590,7 +594,72 @@ try {
   check('review offers Save & add another food', an.another === true, another);
   check('save & add another reopens a scoped Add sheet',
         an.addOpen && an.reviewClosed && /^Add food to /.test(an.title || ''), another);
-  check('save & add another keeps the same sitting', /Joins .+ at .+/.test(an.scope || ''), another);
+  check('save & add another keeps the same group', /Joins the .+ group/.test(an.scope || ''), another);
+
+  // ---- Copy a whole group to another day from the group header ------------
+  const groupCopy = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    viewDate = '';
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    const meal = (state.meals || []).find(m => m.description === 'grp-one');
+    const g = meal && (state.groups || []).find(x => (x.meal_ids || []).includes(meal.id));
+    if (!g) return JSON.stringify({ error: 'no group for grp-one' });
+    const btn = document.querySelector('[data-copy-group="' + g.id + '"]');
+    if (!btn) return JSON.stringify({ error: 'no copy button' });
+    const tomorrowDate = new Date(); tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+    const tomorrow = isoOf(tomorrowDate);
+    const targetDate = new Date(); targetDate.setDate(targetDate.getDate() + 7);
+    const target = isoOf(targetDate);
+    const beforeDst = await fetch('/api/state?date=' + target).then(r => r.json());
+    const beforeIds = new Set((beforeDst.meals || []).map(m => m.id));
+    btn.click();
+    await wait(350);
+    const out = {
+      open: !document.getElementById('copy-group-sheet').hidden,
+      defaultDate: document.getElementById('copy-date').value,
+      tomorrow,
+      hint: document.getElementById('copy-group-hint').textContent,
+      target,
+      groupCount: g.count,
+      srcTimes: (state.meals || []).filter(m => ['grp-one','grp-two'].includes(m.description))
+        .map(m => hmOfTs(m.ts)).sort(),
+    };
+    // Same-day copy is refused and the sheet stays open for a real choice.
+    document.getElementById('copy-date').value = state.date;
+    document.getElementById('btn-do-copy').click();
+    await wait(350);
+    out.sameDateToast = document.getElementById('toast').textContent;
+    out.stillOpen = !document.getElementById('copy-group-sheet').hidden;
+    // Copy to a real target day.
+    document.getElementById('copy-date').value = target;
+    document.getElementById('btn-do-copy').click();
+    await wait(2200);
+    out.closed = document.getElementById('copy-group-sheet').hidden;
+    out.toast = document.getElementById('toast').textContent;
+    const dst = await fetch('/api/state?date=' + target).then(r => r.json());
+    const got = (dst.meals || []).filter(m => !beforeIds.has(m.id));
+    out.copied = got.length;
+    out.dstTimes = got.filter(m => ['grp-one','grp-two'].includes(m.description))
+      .map(m => hmOfTs(m.ts)).sort();
+    for (const m of got) await fetch('/api/meals/' + m.id, { method: 'DELETE' });
+    return JSON.stringify(out);
+  })()`);
+  const gc = JSON.parse(groupCopy);
+  check('group header offers Copy', !gc.error && gc.open === true, groupCopy);
+  check('copy sheet defaults tomorrow for a today group',
+        gc.defaultDate === gc.tomorrow, groupCopy);
+  check('copy sheet describes the group size',
+        new RegExp('Copy ' + gc.groupCount + ' foods').test(gc.hint || ''), groupCopy);
+  check('same-day copy is refused and the sheet stays open',
+        /different day/i.test(gc.sameDateToast || '') && gc.stillOpen === true, groupCopy);
+  check('copy group reports success and closes',
+        gc.closed === true &&
+        new RegExp('Copied ' + gc.groupCount + ' foods to').test(gc.toast || ''), groupCopy);
+  check('copy group creates every food on the target day',
+        gc.copied === gc.groupCount, groupCopy);
+  check('copied foods keep their clock times',
+        JSON.stringify(gc.srcTimes) === JSON.stringify(gc.dstTimes), groupCopy);
 
   // cleanup everything this section created
   await evalJson(`(async () => {
@@ -745,10 +814,11 @@ try {
     await new Promise(r => setTimeout(r, 1200));
     const chips = [...document.querySelectorAll('#quick-chips .chip')];
     out.chipCount = chips.length;
-    out.chipText = chips.length ? chips[0].textContent : '';
+    const chip = chips.find(c => /Creatine/.test(c.textContent));
+    out.chipText = chip ? chip.textContent : (chips[0] ? chips[0].textContent : '');
     out.sheetVisible = !document.getElementById('quick-wrap').hidden;
-    if (chips.length) {
-      chips[0].click();
+    if (chip) {
+      chip.click();
       await new Promise(r => setTimeout(r, 400));
       out.reviewOpen = !document.getElementById('review-sheet').hidden;
       out.source = document.getElementById('review-sheet').dataset.source;
@@ -868,7 +938,9 @@ try {
     const sample = () => {
       const row = [...document.querySelectorAll('.meal-meta')].find(e => /clock probe/.test(
         (e.closest('.meal') || {}).textContent || ''));
-      return { head: (document.querySelector('.group-meta') || {}).textContent || '',
+      const gh = document.querySelector('.group-head');
+      return { head: gh ? gh.querySelector('h3').textContent + ' ' +
+                 (gh.querySelector('.group-meta') || {}).textContent : '',
                meta: row ? row.textContent : '' };
     };
     const as12 = sample();
@@ -902,6 +974,29 @@ try {
   check('time format persists on the server', cf.stored === '24h' || cf.stored === '12h', String(cf.stored));
   check('switching back restores 12-hour display',
         /(AM|PM)/i.test(cf.back.head + ' ' + cf.back.meta), JSON.stringify(cf.back));
+
+  // ---- The grouping window is user-configurable -------------------------
+  const gapSetting = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    document.querySelector('button[data-view="settings"]').click();
+    await wait(300);
+    const before = document.getElementById('s-gap').value;
+    document.getElementById('s-gap').value = '45';
+    document.getElementById('btn-save').click();
+    await wait(1600);
+    const saved = (await fetch('/api/state').then(r => r.json())).settings.meal_gap_minutes;
+    document.getElementById('s-gap').value = '30';
+    document.getElementById('btn-save').click();
+    await wait(1600);
+    const restored = (await fetch('/api/state').then(r => r.json())).settings.meal_gap_minutes;
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    return JSON.stringify({ before, saved, restored });
+  })()`);
+  const gs = JSON.parse(gapSetting);
+  check('Food log settings expose the grouping window', Number(gs.before) === 30, gapSetting);
+  check('grouping window saves from Settings', gs.saved === 45, gapSetting);
+  check('grouping window restores to 30', gs.restored === 30, gapSetting);
 
   // ---- The browser must tell the server its own timezone ----------------
   const tzHeader = await evalJson(`(async () => {

@@ -28,3 +28,6 @@ tls/
 *.crt
 *.sqlite-journal
 node_modules/
+
+# Test artifacts
+settings-auto-button.png
