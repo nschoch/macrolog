@@ -37,7 +37,11 @@ input, select, button { font: inherit; color: inherit; }
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 10px;
   padding: max(10px, env(safe-area-inset-top)) 14px 10px;
-  background: rgba(15,17,21,.88); backdrop-filter: blur(14px);
+  background: rgba(15,17,21,.88);
+  /* iOS through 17 only honours the prefixed property; older Safari otherwise
+     drops the blur entirely. */
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--line);
 }
 .brand { font-weight: 700; letter-spacing: -.02em; font-size: 17px; white-space: nowrap; }

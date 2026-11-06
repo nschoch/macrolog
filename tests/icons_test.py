@@ -65,6 +65,43 @@ if svg.is_file():
     except ET.ParseError as exc:
         check("icon.svg is valid XML", False, str(exc))
 
+# First frame: the shell must paint dark from the HTML itself. Without this,
+# a cold iOS start shows the browser's white canvas (or its white launch
+# screen) until app.css arrives, which is the "white screen until I tap" bug.
+check("index.html has an inline dark first-frame rule",
+      bool(re.search(r"<style>[^<]*html\s*\{\s*background:\s*#0f1115", html)),
+      "no inline <style> painting #0f1115 on <html>")
+check("index.html declares color-scheme dark", 'name="color-scheme" content="dark"' in html)
+check("app.js is preloaded", bool(re.search(r'<link[^>]+rel="preload"[^>]+href="/app\.js"', html)))
+
+# iOS launch images: a home-screen app with no matching startup image paints a
+# plain white screen for the whole launch. Every declared link must resolve to
+# a PNG of exactly the device pixel size its media query describes, or iOS
+# silently ignores it.
+splash = re.findall(r'<link[^>]+rel="apple-touch-startup-image"[^>]*>', html)
+check("index.html declares iOS launch images", bool(splash), "no apple-touch-startup-image")
+seen = set()
+for tag in splash:
+    href = re.search(r'href="([^"]+)"', tag).group(1)
+    media = re.search(r'media="([^"]+)"', tag)
+    if not media:
+        check(f"{href} has a media query", False)
+        continue
+    mw = re.search(r"device-width:\s*(\d+)px", media.group(1))
+    mh = re.search(r"device-height:\s*(\d+)px", media.group(1))
+    md = re.search(r"-webkit-device-pixel-ratio:\s*(\d+)", media.group(1))
+    path = STATIC / href.lstrip("/")
+    ok = path.is_file()
+    check(f"launch image {href} exists", ok, str(path))
+    if ok and mw and mh and md:
+        want = (int(mw.group(1)) * int(md.group(1)), int(mh.group(1)) * int(md.group(1)))
+        got = Image.open(path).size
+        check(f"launch image {href} is {want[0]}x{want[1]}", got == want, str(got))
+        check(f"launch image {href} is opaque", Image.open(path).mode in ("RGB", "P"), "")
+    seen.add((mw.group(1), mh.group(1), md.group(1)) if mw and mh and md else None)
+check("launch images cover the main iPhone sizes",
+      {("390", "844", "3"), ("393", "852", "3"), ("430", "932", "3")} <= seen, str(sorted(x for x in seen if x)))
+
 # The service worker should ship a bumped shell so clients pick up the new head.
 sw = (STATIC / "sw.js").read_text(encoding="utf-8")
 check("service worker cache is versioned", bool(re.search(r"macrolog-shell-v\d+", sw)))
