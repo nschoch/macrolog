@@ -105,6 +105,12 @@ check("launch images cover the main iPhone sizes",
 # The service worker should ship a bumped shell so clients pick up the new head.
 sw = (STATIC / "sw.js").read_text(encoding="utf-8")
 check("service worker cache is versioned", bool(re.search(r"macrolog-shell-v\d+", sw)))
+# `cache.addAll(['/', ...])` aborts the whole install when `/` is a 302 to the
+# login page — which is the normal state of a home-screen web app on iOS, whose
+# cookie jar is separate. Chrome then drops the registration entirely, so the
+# app is left with no worker at all. Entries must be cached individually.
+check("service worker install survives a failed shell entry", "addAll(" not in sw,
+      "install uses addAll(); one redirect can abort it")
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 sys.exit(1 if FAIL else 0)

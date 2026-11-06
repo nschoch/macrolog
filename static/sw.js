@@ -4,11 +4,21 @@
    stale code can't be reused even from this cache. */
 // Bump this whenever the shell/API contract changes. A stale worker with an
 // older cache is the most common reason a hard refresh still shows old UI.
-const CACHE = 'macrolog-shell-v28';
+const CACHE = 'macrolog-shell-v29';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE).then((c) =>
+      // Cache each entry on its own. `addAll` rejects the whole install if any
+      // single request fails, and `/` legitimately redirects to the login page
+      // whenever the app is signed out — which is exactly the state a
+      // home-screen web app starts in (iOS gives it its own cookie jar). One
+      // failed entry used to abort the install, so the worker never activated
+      // and every launch retried the same broken install.
+      Promise.all(SHELL.map((url) => c.add(url).catch(() => {})))
+    ).then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
