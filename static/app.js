@@ -530,9 +530,26 @@ function findGroupForMeal(mealId) {
 
 // ------------------------------------------------------- copy group to day
 let copySourceGroup = null;
+// The day being viewed when the sheet opened. Kept here so the quick-target
+// pills can disable "the day you're on" even if state is refreshed under us.
+let copySourceDate = '';
 
 function isoOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function fmtDay(iso) {
+  return new Date(iso + 'T12:00:00')
+    .toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+// Today and tomorrow together, so the two quick targets can never disagree
+// across a midnight rollover.
+function quickCopyDates() {
+  const t = new Date();
+  const today = isoOf(t);
+  t.setDate(t.getDate() + 1);
+  return { today, tomorrow: isoOf(t) };
 }
 
 // Copying yesterday's breakfast to today is the common case; copying today's
@@ -545,19 +562,35 @@ function defaultCopyDate(sourceDate) {
   return isoOf(d);
 }
 
-function fmtDay(iso) {
-  return new Date(iso + 'T12:00:00')
-    .toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+// Reflect the chosen target date back into the Today/Tomorrow pills. Without
+// this they never showed a selected state, so a tap looked like a dead control
+// — the date field above them was the only feedback. A pill naming the day
+// already on screen is disabled, because copying a day onto itself is refused.
+function syncCopyQuick() {
+  const val = $('copy-date').value;
+  const source = copySourceDate || state?.date || todayISO();
+  const { today, tomorrow } = quickCopyDates();
+  $('copy-quick').querySelectorAll('[data-copy-day]').forEach((b) => {
+    const day = b.dataset.copyDay === 'today' ? today : tomorrow;
+    const on = val === day;
+    const isSource = day === source;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.disabled = isSource;
+    b.title = isSource ? 'That is the day you are viewing' : '';
+  });
 }
 
 function openCopyGroupSheet(g) {
   copySourceGroup = g;
   const source = state?.date || todayISO();
+  copySourceDate = source;
   const n = +g.count || (g.meal_ids || []).length;
   $('copy-group-hint').textContent =
     `Copy ${n} food${n === 1 ? '' : 's'} from ${fmtDay(source)} to another day. ` +
     'Photos and components come along.';
   $('copy-date').value = defaultCopyDate(source);
+  syncCopyQuick();
   $('copy-group-sheet').hidden = false;
   document.body.style.overflow = 'hidden';
 }
@@ -566,19 +599,23 @@ $('btn-cancel-copy').addEventListener('click', closeSheets);
 $('copy-group-sheet').addEventListener('click', (e) => {
   if (e.target.id === 'copy-group-sheet') closeSheets();
 });
+// Typing or picking a date by hand must move the highlight too.
+$('copy-date').addEventListener('input', syncCopyQuick);
+$('copy-date').addEventListener('change', syncCopyQuick);
 $('copy-quick').addEventListener('click', (e) => {
   const b = e.target.closest('[data-copy-day]');
-  if (!b) return;
-  const d = new Date();
-  if (b.dataset.copyDay === 'tomorrow') d.setDate(d.getDate() + 1);
-  $('copy-date').value = isoOf(d);
+  if (!b || b.disabled) return;
+  // Recompute at click time: the sheet may have been open across midnight.
+  const q = quickCopyDates();
+  $('copy-date').value = b.dataset.copyDay === 'tomorrow' ? q.tomorrow : q.today;
+  syncCopyQuick();
 });
 
 guardClick('btn-do-copy', async () => {
   const g = copySourceGroup;
   if (!g) return;
   const target = $('copy-date').value;
-  const source = state?.date || todayISO();
+  const source = copySourceDate || state?.date || todayISO();
   if (!target) { toast('Choose a day to copy to', true); return; }
   if (target === source) { toast('Choose a different day', true); return; }
   try {
@@ -870,6 +907,10 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
   $('r-prov').innerHTML = `${esc(cap(provider || 'manual'))}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
 
   $('review-sheet').hidden = false;
+  // A long component list from the last review must not leave the next one
+  // opened halfway down. Harmless on first open (already 0).
+  const scroll = $('review-scroll');
+  if (scroll) scroll.scrollTop = 0;
   document.body.style.overflow = 'hidden';
 }
 

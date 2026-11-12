@@ -473,6 +473,49 @@ try {
     return m ? {id:m.id, n:m.photos.length} : null })()`);
   check('meal stored with both photos', !!twoShot && twoShot.n === 2, JSON.stringify(twoShot));
 
+  // ---- Long review keeps Cancel/Save pinned at the bottom ----------------
+  // The reported annoyance: a long component list buried the save button at the
+  // end of the scroll. The action row must be visible on open and stay put.
+  const pinned = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    const items = Array.from({ length: 12 }, (_, i) => ({
+      name: 'pin item ' + i, detail: '', grams: 50, calories: 100,
+      protein: 5, carbs: 10, fat: 4, fiber: 1 }));
+    openReview({ estimate: { description: 'pin test', calories: 1200, protein: 60,
+      carbs: 120, fat: 48, items, date: todayISO(),
+      ts: Math.floor(Date.now() / 1000) }, provider: 'stub' });
+    // Wait out the 260ms rise animation; measuring mid-transform reads the
+    // sheet one full height lower than where it settles.
+    await wait(400);
+    const body = document.getElementById('review-scroll');
+    const bar = document.querySelector('#review-sheet .review-actions');
+    const r0 = bar.getBoundingClientRect();
+    const out = {
+      scrollable: body.scrollHeight > body.clientHeight + 2,
+      startsAtTop: body.scrollTop === 0,
+      inViewport: r0.top >= 0 && r0.bottom <= window.innerHeight + 1,
+      barTop: Math.round(r0.top),
+      vh: window.innerHeight,
+      saveInBody: body.contains(document.getElementById('btn-save-review')),
+      saveIsPinned: getComputedStyle(document.querySelector('#review-sheet .sheet')).overflow === 'hidden',
+    };
+    body.scrollTop = body.scrollHeight;
+    await wait(80);
+    const r1 = bar.getBoundingClientRect();
+    out.barHeldWhileScrolling = Math.abs(r1.top - r0.top) <= 1;
+    out.scrolledToEnd = body.scrollTop > 0;
+    document.getElementById('btn-cancel-review').click();
+    out.closed = document.getElementById('review-sheet').hidden;
+    return out;
+  })()`);
+  check('long review is scrollable but save bar is visible without scrolling',
+        pinned.scrollable && pinned.startsAtTop && pinned.inViewport, JSON.stringify(pinned));
+  check('save button lives outside the scrolling body',
+        pinned.saveInBody === false && pinned.saveIsPinned === true, JSON.stringify(pinned));
+  check('save bar stays put while the review body scrolls',
+        pinned.barHeldWhileScrolling === true && pinned.scrolledToEnd === true, JSON.stringify(pinned));
+  check('cancelling the long review closes it', pinned.closed === true, JSON.stringify(pinned));
+
   // ---- Time grouping: two nearby logs share one cluster -------------------
   await evalJson(`(async () => {
     const post = (desc, mins) => { const d = new Date(Date.now() - mins*60000);
@@ -625,6 +668,25 @@ try {
       srcTimes: (state.meals || []).filter(m => ['grp-one','grp-two'].includes(m.description))
         .map(m => hmOfTs(m.ts)).sort(),
     };
+    // The quick-target pills must show which day is currently chosen. Before
+    // this was wired, a tap changed only the date field, so the control read as
+    // dead (the reported "Today/Tomorrow does nothing").
+    const pill = () => {
+      const on = document.querySelector('#copy-quick [aria-pressed="true"]');
+      return on ? on.dataset.copyDay : null;
+    };
+    out.quickOnOpen = pill();
+    out.todayPillDisabled = document.querySelector('[data-copy-day="today"]').disabled;
+    document.querySelector('[data-copy-day="today"]').click();
+    await wait(200);
+    out.todayClickDate = document.getElementById('copy-date').value;
+    document.querySelector('[data-copy-day="tomorrow"]').click();
+    await wait(200);
+    out.afterTomorrow = { date: document.getElementById('copy-date').value, on: pill() };
+    // Picking some other day by hand clears both pills.
+    document.getElementById('copy-date').value = target;
+    document.getElementById('copy-date').dispatchEvent(new Event('input', { bubbles: true }));
+    out.manualOn = pill();
     // Same-day copy is refused and the sheet stays open for a real choice.
     document.getElementById('copy-date').value = state.date;
     document.getElementById('btn-do-copy').click();
@@ -643,6 +705,35 @@ try {
     out.dstTimes = got.filter(m => ['grp-one','grp-two'].includes(m.description))
       .map(m => hmOfTs(m.ts)).sort();
     for (const m of got) await fetch('/api/meals/' + m.id, { method: 'DELETE' });
+
+    // Past-day source (the case in the report): the sheet defaults to today
+    // and the Today pill must already read as selected, so tapping it is
+    // visibly a no-op rather than looking broken.
+    const yd = new Date(); yd.setDate(yd.getDate() - 1);
+    const yiso = isoOf(yd);
+    const seed = await fetch('/api/meals', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: 'grp-yesterday', calories: 90,
+        protein: 4, carbs: 8, fat: 3, date: yiso, time: '11:53', source: 'manual' }) })
+      .then(r => r.json());
+    viewDate = yiso;
+    await refresh();
+    const yg = (state.groups || [])[0];
+    document.querySelector('[data-copy-group="' + yg.id + '"]').click();
+    await wait(250);
+    out.pastDay = {
+      date: document.getElementById('copy-date').value,
+      today: todayISO(),
+      on: pill(),
+      todayDisabled: document.querySelector('[data-copy-day="today"]').disabled,
+      tomorrowDisabled: document.querySelector('[data-copy-day="tomorrow"]').disabled,
+    };
+    document.getElementById('btn-cancel-copy').click();
+    await wait(200);
+    out.pastDayClosed = document.getElementById('copy-group-sheet').hidden;
+    await fetch('/api/meals/' + seed.id, { method: 'DELETE' });
+    viewDate = '';
+    await refresh();
     return JSON.stringify(out);
   })()`);
   const gc = JSON.parse(groupCopy);
@@ -651,6 +742,20 @@ try {
         gc.defaultDate === gc.tomorrow, groupCopy);
   check('copy sheet describes the group size',
         new RegExp('Copy ' + gc.groupCount + ' foods').test(gc.hint || ''), groupCopy);
+  check('copy sheet marks the default target day as selected',
+        gc.quickOnOpen === 'tomorrow', groupCopy);
+  check('a source day is not offered as a quick copy target',
+        gc.todayPillDisabled === true && gc.todayClickDate === gc.tomorrow, groupCopy);
+  check('Tomorrow pill selects tomorrow and shows as selected',
+        gc.afterTomorrow && gc.afterTomorrow.date === gc.tomorrow &&
+        gc.afterTomorrow.on === 'tomorrow', groupCopy);
+  check('a manually picked date clears the quick-target selection',
+        gc.manualOn === null, groupCopy);
+  check('a past-day source opens with Today selected',
+        gc.pastDay && gc.pastDay.date === gc.pastDay.today &&
+        gc.pastDay.on === 'today' && gc.pastDay.todayDisabled === false &&
+        gc.pastDay.tomorrowDisabled === false, groupCopy);
+  check('cancelling the copy sheet closes it', gc.pastDayClosed === true, groupCopy);
   check('same-day copy is refused and the sheet stays open',
         /different day/i.test(gc.sameDateToast || '') && gc.stillOpen === true, groupCopy);
   check('copy group reports success and closes',

@@ -164,6 +164,9 @@ input, select, button { font: inherit; color: inherit; }
 .seg button { border: 0; background: none; color: var(--muted); font-size: 12.5px;
   padding: 6px 14px; border-radius: 999px; }
 .seg button.on { background: var(--text); color: #0f1115; font-weight: 600; }
+.seg button:disabled { opacity: .35; cursor: not-allowed; }
+.seg button.on:disabled { background: var(--panel-2); color: var(--muted); }
+.seg button:focus-visible { outline: 2px solid #4ade80; outline-offset: 1px; }
 
 /* Fiber is a SUBSET of carbs: shown on its own quiet line under the carb bar so
    it reads as detail, not as a fourth macro competing for attention. */
@@ -410,6 +413,17 @@ button { cursor: pointer; }
   background: var(--line); }
 .sheet-grab:active { cursor: grabbing; }
 .sheet h3 { margin: 0 0 4px; font-size: 18px; }
+/* Review sheet: pinned action bar. The sheet is a flex column so only the body
+   scrolls and the Cancel/Save row is always one tap away, however long the
+   component list gets. Sticky would also work, but it leaves the scrollbar
+   under the bar and needs an opaque cover; a real flex footer cannot overlap. */
+.sheet.sheet-review { display: flex; flex-direction: column; overflow: hidden;
+  padding-bottom: 0; }
+.sheet-review .sheet-scroll { min-height: 0; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  padding-bottom: 4px; }
+.sheet-review .review-actions { flex: none; margin: 0;
+  padding: 12px 0 calc(16px + var(--safe-b)); border-top: 1px solid var(--line); }
 .sheet-btns { display: flex; gap: 10px; margin-top: 16px; }
 .sheet-btns .ghost { flex: 1; padding: 13px; }
 .sheet-btns .primary { flex: 2; }

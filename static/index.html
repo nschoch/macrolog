@@ -365,8 +365,11 @@
 
 <!-- ======================= ESTIMATE REVIEW SHEET ===================== -->
 <div class="sheet-backdrop" id="review-sheet" hidden>
-  <div class="sheet">
+  <div class="sheet sheet-review">
     <div class="sheet-grab" title="Drag down or tap to close"></div>
+    <!-- Body scrolls; the Cancel/Save row below stays pinned so saving a long
+         component list never needs a scroll to the bottom. -->
+    <div class="sheet-scroll" id="review-scroll">
     <h3>Does this look right?</h3>
     <p class="hint">Fix anything wrong — your corrections teach the estimator. Editing later also trains it.</p>
     <p class="scope-banner" id="r-scope" hidden></p>
@@ -421,7 +424,8 @@
     <!-- Save this food, then immediately open a scoped Add sheet for the next
          food in the same group. Keeps a multi-photo meal one flow. -->
     <button class="ghost save-another" id="btn-save-another"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>Save &amp; add another food</button>
-    <div class="sheet-btns">
+    </div>
+    <div class="sheet-btns review-actions">
       <button class="ghost" id="btn-cancel-review">Cancel</button>
       <button class="primary" id="btn-save-review"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg><span id="btn-save-review-label">Add to log</span></button>
     </div>
@@ -437,9 +441,9 @@
     <label class="fld">Copy to
       <input id="copy-date" type="date">
     </label>
-    <div class="seg" id="copy-quick">
-      <button type="button" data-copy-day="today">Today</button>
-      <button type="button" data-copy-day="tomorrow">Tomorrow</button>
+    <div class="seg" id="copy-quick" role="group" aria-label="Copy to today or tomorrow">
+      <button type="button" data-copy-day="today" aria-pressed="false">Today</button>
+      <button type="button" data-copy-day="tomorrow" aria-pressed="false">Tomorrow</button>
     </div>
     <div class="sheet-btns">
       <button class="ghost" id="btn-cancel-copy">Cancel</button>
