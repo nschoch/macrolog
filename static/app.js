@@ -318,6 +318,19 @@ function confColor(c) {
   return c >= 0.75 ? 'var(--accent)' : c >= 0.5 ? 'var(--carbs)' : 'var(--danger)';
 }
 
+// Record provenance badge. "no AI" = typed in the Manual form; "re-logged" =
+// tapped from Frequently logged, which reuses a past item without a model call.
+// Neither is the per-item auto/manual macro mode in the review editor.
+function sourceBadge(m) {
+  if (m.source === 'manual') {
+    return ' · <span title="Not an AI estimate — typed by hand">no AI</span>';
+  }
+  if (m.source === 'relog') {
+    return ' · <span title="Re-logged from Frequently logged — no model call">re-logged</span>';
+  }
+  return '';
+}
+
 function mealRowHtml(m) {
     const time = fmtTime(m.ts);
     // A meal may carry several photos (plate + nutrition label); show them all.
@@ -342,7 +355,7 @@ function mealRowHtml(m) {
         ${thumb}
         <div class="meal-info">
           <div class="meal-desc">${esc(m.description || 'Food')}</div>
-          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.source === 'manual' ? ' · <span title="Not an AI estimate — typed by hand or re-logged from history">no AI</span>' : ''}${comps.length ? ` · ${comps.length} item${comps.length === 1 ? '' : 's'}` : ''}</div>
+          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${sourceBadge(m)}${comps.length ? ` · ${comps.length} item${comps.length === 1 ? '' : 's'}` : ''}</div>
         </div>
         <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
         <div class="meal-actions">
@@ -915,8 +928,12 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
     warn.hidden = !warning;
   }
 
-  $('r-prov').innerHTML = `${esc(provider ? cap(provider)
-    : ($('review-sheet').dataset.source === 'manual' ? 'No AI estimate' : 'Manual'))}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
+  const sourceKind = $('review-sheet').dataset.source;
+  const provLabel = provider ? cap(provider)
+    : sourceKind === 'manual' ? 'No AI estimate'
+    : sourceKind === 'relog' ? 'Re-logged from your history'
+    : 'Manual';
+  $('r-prov').innerHTML = `${esc(provLabel)}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
 
   $('review-sheet').hidden = false;
   // A long component list from the last review must not leave the next one
@@ -1319,7 +1336,7 @@ $('quick-chips').addEventListener('click', (e) => {
   openReview({
     estimate: { description: f.name, items: [item], calories: f.calories,
                 protein: f.protein, carbs: f.carbs, fat: f.fat, fiber: f.fiber },
-    source: 'manual',
+    source: 'relog',
     addTo: scope,
   });
   toast(scope ? `${f.name} — adding to ${scope.label}` : `${f.name} — check the portion`);

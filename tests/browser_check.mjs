@@ -930,6 +930,7 @@ try {
       out.itemName = (compItems[0] || {}).name;
       out.itemGrams = (compItems[0] || {}).grams;
       out.itemKcal = (compItems[0] || {}).calories;
+      out.prov = document.getElementById('r-prov').textContent;
     }
     closeSheets();
     if (saved) await fetch('/api/meals/' + saved.id, { method: 'DELETE' });
@@ -940,7 +941,10 @@ try {
   check('frequently logged foods appear in the Add sheet', qk.chipCount >= 1 && qk.sheetVisible === true, quick);
   check('chip opens the review prefilled without a model call',
         qk.reviewOpen === true && qk.itemName === 'Creatine' && qk.itemGrams === 5, quick);
-  check('quick-added food is recorded as manual, not an AI estimate', qk.source === 'manual', quick);
+  check('quick-added food is recorded as a re-log, not an AI estimate',
+        qk.source === 'relog', quick);
+  check('quick-add review says it is re-logged',
+        /Re-logged from your history/.test(qk.prov || ''), qk.prov);
   check('quick-added food keeps its 0 kcal', qk.itemKcal === 0, quick);
 
   // ---- Expanded food rows show a compact macro breakout ------------------
@@ -987,6 +991,10 @@ try {
         JSON.stringify(mr.items?.[0]?.titles));
   check('hand-entered food is marked as having no AI estimate',
         /no AI/.test(mr.meta || '') && !/ · manual\b/.test(mr.meta || ''), mr.meta);
+  const relogRowHtml = await evalJson(`mealRowHtml({ id: 999, ts: 0, description: 'relog probe',
+    calories: 1, confidence: 0.5, source: 'relog', items: [] })`);
+  check('re-logged food row is labelled re-logged',
+        /re-logged/.test(relogRowHtml) && !/no AI/.test(relogRowHtml), relogRowHtml);
 
   // ---- Cross-check hint appears only when the second opinion objects -----
   const xc = await evalJson(`(() => {
