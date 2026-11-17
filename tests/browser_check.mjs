@@ -943,6 +943,51 @@ try {
   check('quick-added food is recorded as manual, not an AI estimate', qk.source === 'manual', quick);
   check('quick-added food keeps its 0 kcal', qk.itemKcal === 0, quick);
 
+  // ---- Expanded food rows show a compact macro breakout ------------------
+  // Tapping a food with components used to reveal only grams and calories.
+  const macroRow = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    viewDate = '';
+    document.querySelector('button[data-view="today"]').click();
+    await refresh();
+    const res = await fetch('/api/meals', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: 'macro probe', calories: 300, protein: 25, carbs: 30,
+        fat: 12, fiber: 6, source: 'manual', items: [
+          { name: 'Probe A', grams: 150, calories: 200, protein: 20, carbs: 18, fat: 8, fiber: 5 },
+          { name: 'Probe B', grams: 40, calories: 100, protein: 5, carbs: 12, fat: 4, fiber: 1 }] }) });
+    const saved = await res.json();
+    await refresh();
+    const row = document.querySelector('.meal[data-id="' + saved.id + '"]');
+    if (!row) return JSON.stringify({ error: 'probe row missing' });
+    row.querySelector('.meal-row').click();
+    await wait(350);
+    const items = [...row.querySelectorAll('.comp-list li')].map(li => ({
+      grams: li.querySelector('.c-g')?.textContent.trim(),
+      kcal: li.querySelector('.c-k')?.textContent.trim(),
+      macros: [...li.querySelectorAll('.c-macros .c-macro')].map(s => s.textContent.trim()),
+      titles: [...li.querySelectorAll('.c-macros abbr')].map(a => a.getAttribute('title')),
+    }));
+    const out = { items, meta: row.querySelector('.meal-meta').textContent,
+                  open: row.classList.contains('open') };
+    await fetch('/api/meals/' + saved.id, { method: 'DELETE' });
+    await refresh();
+    return JSON.stringify(out);
+  })()`);
+  const mr = JSON.parse(macroRow);
+  check('tapping a food expands it', mr.open === true, macroRow);
+  check('each component keeps grams and kcal',
+        mr.items?.length === 2 && mr.items[0].grams === '150g' && mr.items[0].kcal === '200',
+        JSON.stringify(mr.items?.[0]));
+  check('expanded component shows P/C/Fib/F',
+        JSON.stringify(mr.items?.[0]?.macros) === JSON.stringify(['P 20g', 'C 18g', 'Fib 5g', 'F 8g'])
+        && JSON.stringify(mr.items?.[1]?.macros) === JSON.stringify(['P 5g', 'C 12g', 'Fib 1g', 'F 4g']),
+        JSON.stringify(mr.items?.map(i => i.macros)));
+  check('macro abbreviations explain themselves',
+        JSON.stringify(mr.items?.[0]?.titles) === JSON.stringify(['Protein', 'Carbs', 'Fiber', 'Fat']),
+        JSON.stringify(mr.items?.[0]?.titles));
+  check('hand-entered food is marked as having no AI estimate',
+        /no AI/.test(mr.meta || '') && !/ · manual\b/.test(mr.meta || ''), mr.meta);
+
   // ---- Cross-check hint appears only when the second opinion objects -----
   const xc = await evalJson(`(() => {
     const read = (crosscheck) => {
@@ -1426,6 +1471,34 @@ try {
   check('canvas height stable across redraws', new Set(stab).size === 1 && stab[0] <= 400, JSON.stringify(stab));
   check('trend stats populated', await evalJson(
     `document.getElementById('trend-stats').textContent.includes('Current')`));
+  // Weight readouts keep one decimal (rounding 158.1 to "158" also truncated
+  // the daily prefill when Log was tapped without retyping it).
+  const wfmt = await evalJson(`(() => {
+    const units = state.settings.units;
+    state.settings.units = 'metric'; const metric = U.weightShort(71.34);
+    state.settings.units = 'imperial'; const imperial = U.weightShort(71.34);
+    state.settings.units = units;
+    return { metric, imperial };
+  })()`);
+  check('weight formatter keeps one decimal in both units',
+        wfmt.metric === '71.3' && wfmt.imperial === '157.3', JSON.stringify(wfmt));
+  const currentWeight = await evalJson(
+    `document.querySelector('#trend-stats .stat .stat-v').textContent`);
+  check('current weight keeps its decimal', /^\d+\.\d$/.test(currentWeight), currentWeight);
+  const dockPrefillValue = await evalJson(`(() => {
+    const old = state.last_weight;
+    document.getElementById('w-value').value = '';
+    dockPrefill = false;
+    state.last_weight = { kg: 71.34, days_ago: 1 };
+    syncWeightDock();
+    const v = document.getElementById('w-value').value;
+    state.last_weight = old;
+    document.getElementById('w-value').value = '';
+    dockPrefill = false;
+    syncWeightDock();
+    return v;
+  })()`);
+  check('weight dock prefill keeps the decimal', dockPrefillValue === '71.3', dockPrefillValue);
 
   // Regression (audit M11): deleting through the UI must keep `state` intact.
   const errsDel = jsErrors.length;

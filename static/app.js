@@ -44,10 +44,11 @@ const U = {
     const v = this.imperial ? this.kgToLb(kg) : kg;
     return v.toFixed(1) + (withUnit ? (this.imperial ? ' lb' : ' kg') : '');
   },
-  // Weight without decimals for compact stat cards.
-  weightInt(kg) {
-    if (kg == null || isNaN(kg)) return '–';
-    return String(Math.round(this.imperial ? this.kgToLb(kg) : kg));
+  // Compact weight for stat cards and the daily prefill. Always keep one
+  // decimal: rounding to a whole pound also truncated the prefilled value when
+  // the user tapped Log without retyping it, silently losing the tenth.
+  weightShort(kg) {
+    return this.weight(kg, false);
   },
   // Rate of change per week, converted from kg/wk.
   rate(kgPerWk, withUnit = true) {
@@ -325,17 +326,23 @@ function mealRowHtml(m) {
       ? pics.slice(0, 2).map(p => `<img class="meal-thumb" src="/api/photo/${encodeURIComponent(p)}" alt="" loading="lazy">`).join('')
       : `<div class="meal-thumb"></div>`;
     const comps = (m.items || []);
+    // Expanded rows show the full macro split, not just grams and calories.
+    // Abbreviated labels keep four numbers on one line on a phone; the title
+    // on each abbreviation spells it out for touch/assistive use.
+    const macro = (abbr, full, val) =>
+      `<span class="c-macro"><abbr title="${full}">${abbr}</abbr> ${fmt(val)}g</span>`;
     const compHtml = comps.length ? `
       <ul class="comp-list">${comps.map(c =>
         `<li><span class="c-name">${esc(c.name || 'item')}${c.detail
-          ? `<span class="c-detail">${esc(c.detail)}</span>` : ''}</span><span class="c-g">${fmt(c.grams)}g</span><span class="c-k">${fmt(c.calories)}</span></li>`
+          ? `<span class="c-detail">${esc(c.detail)}</span>` : ''}</span><span class="c-g">${fmt(c.grams)}g</span><span class="c-k">${fmt(c.calories)}</span>
+          <span class="c-macros" aria-label="Protein ${fmt(c.protein)} grams, carbs ${fmt(c.carbs)} grams, fiber ${fmt(c.fiber)} grams, fat ${fmt(c.fat)} grams">${macro('P', 'Protein', c.protein)}${macro('C', 'Carbs', c.carbs)}${macro('Fib', 'Fiber', c.fiber)}${macro('F', 'Fat', c.fat)}</span></li>`
       ).join('')}</ul>` : '';
   return `<li class="meal ${comps.length ? 'has-comps' : ''}" data-id="${m.id}">
       <div class="meal-row" data-toggle="${m.id}">
         ${thumb}
         <div class="meal-info">
           <div class="meal-desc">${esc(m.description || 'Food')}</div>
-          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.source === 'manual' ? ' · manual' : ''}${comps.length ? ` · ${comps.length} item${comps.length === 1 ? '' : 's'}` : ''}</div>
+          <div class="meal-meta"><span class="conf-dot" style="background:${confColor(m.confidence)}"></span>${time}${m.source === 'manual' ? ' · <span title="Not an AI estimate — typed by hand or re-logged from history">no AI</span>' : ''}${comps.length ? ` · ${comps.length} item${comps.length === 1 ? '' : 's'}` : ''}</div>
         </div>
         <div class="meal-kcal">${fmt(m.calories)}<small>kcal</small></div>
         <div class="meal-actions">
@@ -468,6 +475,9 @@ $('meal-groups').addEventListener('click', async (e) => {
         items: meal.items || [], ts: meal.ts, date: meal.date,
       },
       provider: meal.provider, model: meal.model, editingId: id,
+      // Keep the saved provenance when editing: without it, openReview assumed
+      // photo/text and a hand-entered food silently lost its "no AI" marker.
+      source: meal.source,
       // Carry the saved photo list through this path too; otherwise opening a
       // today meal via the pencil hides the Rescan button even though it has
       // an image. (Past-day taps pass the whole meal and already work.)
@@ -487,7 +497,8 @@ $('meal-groups').addEventListener('click', async (e) => {
   try {
     const m = await api(`meals/${head.dataset.toggle}`);
     openReview({ estimate: m, provider: m.provider, model: m.model,
-      editingId: m.id, photoUrl: m.photo ? `/api/photo/${encodeURIComponent(m.photo)}` : null });
+      editingId: m.id, source: m.source,
+      photoUrl: m.photo ? `/api/photo/${encodeURIComponent(m.photo)}` : null });
   } catch (err) { toast(err.message, true); }
 });
 
@@ -904,7 +915,8 @@ function openReview({ estimate, provider, model, calibrated, previewUrl, photoUr
     warn.hidden = !warning;
   }
 
-  $('r-prov').innerHTML = `${esc(cap(provider || 'manual'))}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
+  $('r-prov').innerHTML = `${esc(provider ? cap(provider)
+    : ($('review-sheet').dataset.source === 'manual' ? 'No AI estimate' : 'Manual'))}${model ? ' · ' + esc(model) : ''} · confidence <b style="color:${confColor(e.confidence ?? .5)}">${conf}%</b>${calibrated ? ' · calibrated by your history' : ''}`;
 
   $('review-sheet').hidden = false;
   // A long component list from the last review must not leave the next one
@@ -1472,7 +1484,7 @@ function syncWeightDock() {
   // Only prefill when the user hasn't started typing, so we never clobber an
   // entry mid-edit (refresh() runs on every save and view change).
   if (!dockPrefill && !el.value && lw && lw.days_ago >= 1) {
-    el.value = U.weightInt(lw.kg);
+    el.value = U.weightShort(lw.kg);
     dockPrefill = true;
   } else if (dockPrefill && el.value && !lw) {
     el.value = ''; dockPrefill = false;
@@ -1529,7 +1541,7 @@ function renderTrendStats(h) {
   const avgP = days ? Math.round(h.intake.reduce((a, d) => a + d.protein, 0) / days) : 0;
 
   $('trend-stats').innerHTML = `
-    <div class="stat"><div class="stat-k">Current</div><div class="stat-v">${last != null ? U.weightInt(last) : '–'}</div><div class="stat-s">${U.wUnitLabel()} (latest)</div></div>
+    <div class="stat"><div class="stat-k">Current</div><div class="stat-v">${last != null ? U.weightShort(last) : '–'}</div><div class="stat-s">${U.wUnitLabel()} (latest)</div></div>
     <div class="stat"><div class="stat-k">Change</div><div class="stat-v">${change == null ? '–' : (change > 0 ? '+' : '') + (U.imperial ? U.kgToLb(change).toFixed(1) : change.toFixed(1))}</div><div class="stat-s">${U.wUnitLabel()} over window</div></div>
     <div class="stat"><div class="stat-k">Avg intake</div><div class="stat-v">${avgIn || '–'}</div><div class="stat-s">kcal on ${days} logged days</div></div>
     <div class="stat"><div class="stat-k">Avg protein</div><div class="stat-v">${avgP || '–'}</div><div class="stat-s">g per day</div></div>
@@ -1597,7 +1609,7 @@ function drawWeightChart(h) {
   for (let i = 0; i <= 3; i++) {
     const val = lo + (hi - lo) * i / 3, y = sy(val);
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
-    ctx.fillText(U.imperial ? String(Math.round(val)) : val.toFixed(1), 2, y + 3);
+    ctx.fillText(val.toFixed(1), 2, y + 3);
   }
 
   ctx.beginPath();

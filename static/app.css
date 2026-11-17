@@ -263,7 +263,7 @@ input, select, button { font: inherit; color: inherit; }
 .meal-row { display: flex; align-items: center; gap: 11px; padding: 10px 12px; }
 .meal.has-comps .meal-row { cursor: pointer; }
 .comp-list { list-style: none; margin: 0; padding: 0 12px; max-height: 0; overflow: hidden; transition: max-height .25s ease, padding .25s ease; }
-.meal.open .comp-list { max-height: 400px; padding: 2px 12px 10px; }
+.meal.open .comp-list { max-height: 70vh; overflow-y: auto; padding: 2px 12px 10px; }
 .comp-list li { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 4px 0; border-top: 1px dashed var(--line); }
 .comp-list .c-name { color: var(--text); min-width: 0; }
 .comp-list .c-detail { display: block; font-size: 10.5px; color: var(--muted);
@@ -271,6 +271,12 @@ input, select, button { font: inherit; color: inherit; }
   margin-top: 1px; }
 .comp-list .c-g { font-variant-numeric: tabular-nums; min-width: 46px; text-align: right; }
 .comp-list .c-k { font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; color: var(--text); }
+/* The macro split sits on its own line under the name/grams/kcal row so four
+   numbers still fit a 390px phone. */
+.comp-list .c-macros { grid-column: 1 / -1; display: flex; flex-wrap: wrap;
+  gap: 2px 12px; margin-top: 1px; font-size: 10.5px; line-height: 1.35; color: var(--muted); }
+.comp-list .c-macro { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.comp-list .c-macros abbr { text-decoration: none; color: var(--text); font-weight: 600; cursor: help; }
 .meal-thumb { width: 46px; height: 46px; border-radius: 9px; object-fit: cover; background: var(--panel-2); flex: none; }
 .meal-info { flex: 1; min-width: 0; }
 .meal-desc { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -4,7 +4,7 @@
    stale code can't be reused even from this cache. */
 // Bump this whenever the shell/API contract changes. A stale worker with an
 // older cache is the most common reason a hard refresh still shows old UI.
-const CACHE = 'macrolog-shell-v31';
+const CACHE = 'macrolog-shell-v32';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
