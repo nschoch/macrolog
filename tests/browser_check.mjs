@@ -215,21 +215,44 @@ try {
   await evalJson(`document.querySelector('button[data-view="settings"]').click()`);
   await sleep(1200); drain();
 
-  const btnState = () => evalJson(`(({label: document.getElementById('btn-unlock').textContent.trim(),
+  const btnState = () => evalJson(`(({
+      label: document.getElementById('btn-unlock').textContent.trim(),
       targetVal: document.getElementById('s-target').value,
+      placeholder: document.getElementById('s-target').placeholder,
+      targetHint: document.getElementById('s-target-hint').textContent,
+      hintHidden: document.getElementById('s-target-hint').hidden,
+      title: document.getElementById('s-target').title,
       autoDisabled: document.getElementById('s-autoadapt').disabled,
-      lockHintHidden: document.getElementById('s-lock-hint').hidden,
+      autoChecked: document.getElementById('s-autoadapt').checked,
+      calcHidden: document.getElementById('s-target-calc').hidden,
+      calcLines: [...document.querySelectorAll('#s-target-calc-list li')]
+        .map(li => li.textContent).join(' | '),
       viewActive: document.getElementById('view-settings').classList.contains('active')}))`);
+  const serverTarget = () => evalJson(`fetch('/api/state').then(r=>r.json()).then(d=>({
+      v: d.settings.calorie_target ?? null,
+      locked: !!d.settings.calorie_target_locked,
+      auto: d.settings.auto_adapt !== false,
+      mode: (d.target_detail || {}).mode}))`);
 
   let s0 = await btnState();
-  // Reset the pinned target first: the toggle assertions below need the
-  // "auto" starting state, and an earlier run may have left a locked value.
+  // Reset the pinned target first: the assertions below need the "auto"
+  // starting state, and an earlier run may have left a manual value.
   await evalJson(`fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ calorie_target: null }) }).then(r => r.json()).then(d => d.settings.calorie_target ?? null)`);
+    body: JSON.stringify({ calorie_target: null, calorie_target_locked: false, auto_adapt: true })
+  }).then(r => r.json())`);
   await evalJson(`refresh()`); await sleep(900);
   s0 = await btnState();
   check('settings view active', s0.viewActive);
-  check('button shows "auto" on fresh account (calorie_target null)', s0.label === 'auto', `label=${s0.label}`);
+  check('auto target shows as a ghost placeholder',
+        s0.label === 'auto' && s0.targetVal === '' && /^\d[\d,]*$/.test(s0.placeholder || ''),
+        JSON.stringify(s0));
+  check('auto target hint and tooltip explain the calculation',
+        s0.hintHidden === false && /Auto target/.test(s0.targetHint || '')
+        && /BMR/.test(s0.title || '') && /Goal/.test(s0.title || ''),
+        JSON.stringify({ hint: s0.targetHint, title: s0.title }));
+  check('calculation detail is available on tap (mobile-friendly)',
+        s0.calcHidden === false && /BMR/.test(s0.calcLines || '')
+        && /Goal/.test(s0.calcLines || ''), JSON.stringify({ hidden: s0.calcHidden, lines: s0.calcLines }));
 
   // ---- AI provider card: empty state + add/edit sheet wiring --------------
   const provUi = await evalJson(`(() => {
@@ -322,33 +345,73 @@ try {
   check('Apple Health token controls produced no JS error',
         jsErrors.length === healthErrs, jsErrors.slice(healthErrs).join(' | ').slice(0, 300));
 
-  // Click 1: auto -> lock (server pins 2200 fallback when target was null? see code: locks at s.calorie_target || 2200)
+  // Typing a target pins it as manual; clearing the box returns to auto.
+  const typeManual = await evalJson(`(() => {
+    const i = document.getElementById('s-target');
+    i.value = '2000';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    return { label: document.getElementById('btn-unlock').textContent.trim(),
+             hint: document.getElementById('s-target-hint').textContent,
+             autoDisabled: document.getElementById('s-autoadapt').disabled,
+             placeholder: i.placeholder };
+  })()`);
+  check('typing a target switches the field to manual',
+        typeManual.label === 'manual' && /Manual target/.test(typeManual.hint)
+        && typeManual.autoDisabled === true && typeManual.placeholder === '',
+        JSON.stringify(typeManual));
   const errsBefore = jsErrors.length;
-  await evalJson(`document.getElementById('btn-unlock').click()`);
-  await sleep(2500); await watchdog(); drain();
-  check('click #1 produced no JS error', jsErrors.length === errsBefore, jsErrors.slice(errsBefore).join(' | ').slice(0, 300));
+  await evalJson(`document.getElementById('btn-save').click()`);
+  await sleep(2600); await watchdog(); drain();
+  check('manual target save produced no JS error',
+        jsErrors.length === errsBefore, jsErrors.slice(errsBefore).join(' | ').slice(0, 300));
   let s1 = await btnState();
-  check('after click #1 button shows "locked"', s1.label === 'locked', `label=${s1.label} targetVal=${s1.targetVal}`);
-  check('locked pauses the auto-adapt checkbox and explains why',
-        s1.autoDisabled === true && s1.lockHintHidden === false, JSON.stringify(s1));
+  check('saved target shows as manual',
+        s1.label === 'manual' && s1.targetVal === '2000'
+        && s1.autoDisabled === true && /Manual target/.test(s1.targetHint || ''),
+        JSON.stringify(s1));
+  const st1 = await serverTarget().catch(() => null);
+  check('server stores a manual target',
+        !!st1 && st1.v === 2000 && st1.locked === true && st1.auto === false,
+        JSON.stringify(st1));
 
-  // Verify server-side (in-page fetch so the session cookie rides along).
-  const serverTarget = () => evalJson(`fetch('/api/state').then(r=>r.json()).then(d=>({v: d.settings.calorie_target ?? null}))`).then(o => o.v);
-  const st = await serverTarget().catch(() => 'ERR');
-  check('server calorie_target pinned after lock', st != null && st !== 'ERR', `calorie_target=${st}`);
-
-  // Click 2: locked -> auto.
   const errsBefore2 = jsErrors.length;
-  await evalJson(`document.getElementById('btn-unlock').click()`);
-  await sleep(2500); await watchdog(); drain();
-  check('click #2 produced no JS error', jsErrors.length === errsBefore2, jsErrors.slice(errsBefore2).join(' | ').slice(0, 300));
+  await evalJson(`(() => {
+    const i = document.getElementById('s-target');
+    i.value = '';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const cleared = await btnState();
+  check('clearing the target returns the field to auto',
+        cleared.label === 'auto' && cleared.targetVal === ''
+        && cleared.autoDisabled === false && /Auto target/.test(cleared.targetHint || ''),
+        JSON.stringify(cleared));
+  await evalJson(`document.getElementById('btn-save').click()`);
+  await sleep(2600); await watchdog(); drain();
+  check('clearing the target produced no JS error',
+        jsErrors.length === errsBefore2, jsErrors.slice(errsBefore2).join(' | ').slice(0, 300));
   let s2 = await btnState();
-  check('after click #2 button shows "auto"', s2.label === 'auto', `label=${s2.label}`);
-  check('unlocking re-enables auto-adapt and hides the lock hint',
-        s2.autoDisabled === false && s2.lockHintHidden === true, JSON.stringify(s2));
+  check('auto target is shown as a ghost again',
+        s2.label === 'auto' && s2.targetVal === '' && /^\d[\d,]*$/.test(s2.placeholder || '')
+        && s2.autoDisabled === false, JSON.stringify(s2));
+  const st2 = await serverTarget().catch(() => null);
+  check('server has no manual pin after clearing',
+        !!st2 && st2.locked === false && st2.auto === true,
+        JSON.stringify(st2));
 
-  const st2 = await serverTarget().catch(() => 'ERR');
-  check('server calorie_target cleared after unlock', st2 == null, `calorie_target=${st2}`);
+  // The auto/manual button is a shortcut for the same two transitions.
+  const errsBefore3 = jsErrors.length;
+  await evalJson(`document.getElementById('btn-unlock').click()`);
+  await sleep(2600); await watchdog(); drain();
+  let s3 = await btnState();
+  check('auto/manual button pins the current auto target',
+        s3.label === 'manual' && Number(s3.targetVal) > 0, JSON.stringify(s3));
+  await evalJson(`document.getElementById('btn-unlock').click()`);
+  await sleep(2600); await watchdog(); drain();
+  let s4 = await btnState();
+  check('auto/manual button returns to auto',
+        s4.label === 'auto' && s4.targetVal === '', JSON.stringify(s4));
+  check('target mode toggling produced no JS error',
+        jsErrors.length === errsBefore3, jsErrors.slice(errsBefore3).join(' | ').slice(0, 300));
 
   // ---- Day browsing: prev-day navigation + past-day meal editor ----------
   // Seed a meal on yesterday via the API (in-page fetch carries the cookie).

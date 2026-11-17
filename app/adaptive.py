@@ -219,7 +219,8 @@ def adapt_targets(db, settings: dict, today=None, owner: str = "default",
               "target": formula_target}
 
     if settings.get("calorie_target_locked"):
-        result.update(reason="target locked", target=settings.get("calorie_target"))
+        result.update(reason="target locked",
+                      target=settings.get("calorie_target") or formula_target)
         return result
 
     start_date = settings.get("start_date")
@@ -275,7 +276,7 @@ def adapt_targets(db, settings: dict, today=None, owner: str = "default",
             since = None
         if since is not None and since < 7:
             result.update(reason=f"next review in {7 - since} days",
-                          target=settings.get("calorie_target"))
+                          target=settings.get("calorie_target") or formula_target)
             return result
 
     observed_kcal_per_day = trend["slope_kg_per_week"] * KCAL_PER_KG / 7.0
@@ -283,7 +284,7 @@ def adapt_targets(db, settings: dict, today=None, owner: str = "default",
     if maintenance_est < bmr * 0.85:
         result.update(reason="trend and intake disagree; holding target",
                       maintenance=round(maintenance_est),
-                      target=settings.get("calorie_target"))
+                      target=settings.get("calorie_target") or formula_target)
         return result
 
     # Blend with the formula estimate; the more real data we have, the more we

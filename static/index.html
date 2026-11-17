@@ -178,15 +178,18 @@
         <label id="s-rate-label">Weekly change (kg)<input id="s-rate" type="number" step="0.05" inputmode="decimal" min="-1.5" max="1"></label>
         <label><span id="s-protein-label">Protein (g per kg)</span><input id="s-protein" type="number" step="0.1" inputmode="decimal" min="0.8" max="3"></label>
         <label>Fat (% of kcal)<input id="s-fatpct" type="number" step="0.05" inputmode="decimal" min="0.15" max="0.6"></label>
-        <label>Calorie target
-          <div class="inline-input"><input id="s-target" type="number" inputmode="numeric" min="1000" max="8000">
-          <button class="ghost tiny" id="btn-unlock" title="Lock target against auto-adjust">auto</button></div>
+        <label><span id="s-target-label">Calorie target</span>
+          <div class="inline-input"><input id="s-target" type="number" inputmode="numeric" min="1000" max="8000" placeholder="auto">
+          <button class="ghost tiny" id="btn-unlock" title="Switch between automatic and manual target">auto</button></div>
         </label>
       </div>
+      <p class="hint" id="s-target-hint" hidden></p>
+      <details class="target-calc" id="s-target-calc" hidden>
+        <summary>How this is calculated</summary>
+        <ul id="s-target-calc-list"></ul>
+      </details>
       <label class="check"><input type="checkbox" id="s-autoadapt"> Adjust my target automatically from weight trend</label>
       <label class="check"><input type="checkbox" id="s-calibrate"> Calibrate estimates with my past corrections</label>
-      <p class="hint" id="s-lock-hint" hidden>Target locked — automatic adjustments are paused
-        until you tap “auto”.</p>
     </div>
 
     <div class="card">

@@ -1059,7 +1059,33 @@ st, r = req("/api/settings", "PUT", {"health_token_hash": "f" * 64})
 check("client cannot write the health token hash",
       st == 200 and not (r.get("settings") or {}).get("health_token_hash"), str(st))
 req("/api/settings", "PUT", {"calorie_target_locked": False, "calorie_target": None,
-                             "weekly_rate_kg": -0.5})
+                             "auto_adapt": True, "weekly_rate_kg": -0.5})
+
+# ----------------------------------- auto target math (the deficit must count)
+st, s = req("/api/state")
+td = s.get("target_detail") or {}
+check("state carries the calorie-target breakdown",
+      isinstance(td.get("target"), (int, float))
+      and isinstance(td.get("seed"), (int, float)), str(td)[:200])
+check("auto target is below maintenance for a cut",
+      td.get("target", 0) < td.get("seed", 0),
+      f"target={td.get('target')} seed={td.get('seed')} deficit={td.get('deficit')}")
+check("auto target matches the macro calorie goal",
+      (s.get("targets") or {}).get("calories") == td.get("target"),
+      f"{s.get('targets')} vs {td.get('target')}")
+check("target tooltip explains the formula",
+      bool(td.get("lines")) and any("BMR" in line for line in td["lines"])
+      and any("Goal" in line for line in td["lines"]), str(td.get("lines"))[:200])
+
+st, r = req("/api/settings", "PUT", {"calorie_target_locked": True,
+                                     "calorie_target": 2000, "auto_adapt": False})
+st, s = req("/api/state")
+td = s.get("target_detail") or {}
+check("manual target is used verbatim",
+      td.get("mode") == "manual" and td.get("target") == 2000
+      and (s.get("targets") or {}).get("calories") == 2000, str(td)[:200])
+req("/api/settings", "PUT", {"calorie_target_locked": False, "calorie_target": None,
+                             "auto_adapt": True, "weekly_rate_kg": -0.5})
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

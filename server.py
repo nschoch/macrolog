@@ -60,7 +60,7 @@ if __name__ == "__main__":
 from app.adaptive import (accuracy_summary, adapt_targets, apply_calibration,
                           calibration_multipliers, macronutrient_targets,
                           record_correction, tdee_from_formula, weight_trend,
-                          bmr_from_formula)
+                          bmr_from_formula, KCAL_PER_KG)
 from app.database import Database
 from app.vision import (PROVIDER_KINDS, ProviderError, estimate_meal,
                         estimate_photo, estimate_text, provider_default_base,
@@ -90,7 +90,7 @@ DEFAULT_SETTINGS = {
     "sex": "male",
     "age": 35,
     "height_cm": 178,
-    "activity_factor": 1.4,
+    "activity_factor": 1.35,
     "weekly_rate_kg": -0.5,         # negative = cut
     "protein_g_per_kg": 1.8,
     "fat_calorie_pct": 0.25,
@@ -413,8 +413,8 @@ class Api:
                     for k in ("calories", "protein", "carbs", "fat", "fiber")}
         rows = db.query("SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
         trend = weight_trend(rows)
-        target = s.get("calorie_target") or tdee_from_formula(
-            s, trend["current_kg"]) or 2200
+        detail = _target_snapshot(s, trend, owner)
+        target = detail["target"]
         tmp = dict(s); tmp["_current_weight_kg"] = trend["current_kg"]
         targets = macronutrient_targets(target, tmp)
         # Disabled entries must not count as ready or become active_provider.
@@ -435,6 +435,7 @@ class Api:
             "date": t, "meals": dicts,
             "groups": group_meals(dicts, gap),
             "consumed": consumed, "targets": targets, "trend": trend,
+            "target_detail": detail,
             "settings": _public_settings(s), "providers": providers,
             "health_export": _health_export_status(owner),
             "active_provider": ready[0] if ready else "stub",
@@ -906,7 +907,9 @@ class Api:
         ex = db.query("SELECT date, SUM(calories) c FROM exercises WHERE date >= ? AND owner=? "
                       "GROUP BY date", (start, owner))
         s = get_settings(owner)
-        target = s.get("calorie_target") or tdee_from_formula(s) or 2200
+        all_weights = db.query(
+            "SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
+        target = _target_snapshot(s, weight_trend(all_weights), owner)["target"]
         return 200, {
             "days": days, "target": target,
             "intake": [{"date": r["date"], "calories": round(r["c"] or 0),
@@ -1007,7 +1010,12 @@ class Api:
     def GET_settings(h, q, body):
         owner = getattr(h, "owner", "default")
         s = get_settings(owner)
+        rows = db.query("SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
+        detail = _target_snapshot(s, weight_trend(rows), owner)
+        targets = macronutrient_targets(
+            detail["target"], {**s, "_current_weight_kg": detail.get("current_kg")})
         return 200, {"settings": _public_settings(s),
+                     "targets": targets, "target_detail": detail,
                      "accuracy": accuracy_summary(db, owner),
                      "multipliers": calibration_multipliers(db, owner=owner),
                      "has_keys": {k: bool(os.environ.get(k)) for k in
@@ -1051,8 +1059,12 @@ class Api:
         if personal:
             save_user_settings(owner, personal)
         s = get_settings(owner)
-        return 200, {"settings": _public_settings(s), "targets": macronutrient_targets(
-            s.get("calorie_target") or tdee_from_formula(s) or 2200, s)}
+        rows = db.query("SELECT date, value FROM weights WHERE owner=? ORDER BY date", (owner,))
+        detail = _target_snapshot(s, weight_trend(rows), owner)
+        targets = macronutrient_targets(
+            detail["target"], {**s, "_current_weight_kg": detail.get("current_kg")})
+        return 200, {"settings": _public_settings(s), "targets": targets,
+                     "target_detail": detail}
 
     @staticmethod
     def POST_health_token(h, q, body):
@@ -1451,6 +1463,147 @@ def _public_settings(s: dict) -> dict:
         for p in s.get("shared_providers", []) if isinstance(p, dict)
     ]
     return out
+
+
+def _kcal(n) -> str:
+    try:
+        return f"{round(float(n)):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _target_snapshot(s: dict, trend: dict, owner: str = "default") -> dict:
+    """Resolve the calorie target and the arithmetic behind it (read-only).
+
+    Auto mode asks the adaptive engine for its current proposal; until there is
+    enough trend/intake data that falls back to the formula target
+    (TDEE + weekly goal). Manual/fixed modes use the stored number but still
+    compute a fresh ``auto_target`` so clearing the box can preview exactly
+    what auto would do. The engine runs on a copy, so this never writes.
+    """
+    work = json.loads(json.dumps(s))
+    locked = bool(work.get("calorie_target_locked"))
+    adapt_on = work.get("auto_adapt", True) is not False
+    stored = work.get("calorie_target")
+
+    if locked or not adapt_on:
+        # Active mode is manual/fixed. Compute the fresh auto proposal as if
+        # the pin were released and a forced review ran, so the exit preview
+        # matches what clearing the field (then saving) will do.
+        probe = json.loads(json.dumps(work))
+        probe["calorie_target_locked"] = False
+        probe["auto_adapt"] = True
+        probe["calorie_target"] = None
+        probe["target_adjusted_on"] = None
+    else:
+        probe = work
+    try:
+        res = adapt_targets(db, probe, today=date.fromisoformat(today_str()),
+                            owner=owner)
+    except Exception:
+        res = {}
+
+    current_kg = trend.get("current_kg")
+    try:
+        seed = float(res.get("seed") or tdee_from_formula(work, current_kg) or 0)
+    except (TypeError, ValueError):
+        seed = 0.0
+    try:
+        bmr = float(res.get("bmr") or bmr_from_formula(work, current_kg) or 0)
+    except (TypeError, ValueError):
+        bmr = 0.0
+    rate = float(work.get("weekly_rate_kg") or 0.0)
+    deficit = rate * KCAL_PER_KG / 7.0
+    floor = max(1200.0, bmr)
+    formula_target = round(max(seed + deficit, floor))
+    auto_target = res.get("target")
+    if auto_target is None:
+        auto_target = formula_target
+    auto_target = round(max(floor, float(auto_target)))
+
+    imperial = str(work.get("units") or "metric") == "imperial"
+    rate_disp = rate * 2.2046226 if imperial else rate
+    rate_unit = "lb/wk" if imperial else "kg/wk"
+    rate_dec = 1 if imperial else 2
+    activity = float(work.get("activity_factor") or 1.35)
+    obs = trend.get("slope_kg_per_week")
+    obs_disp = obs * 2.2046226 if (imperial and obs is not None) else obs
+
+    auto_lines = [
+        f"BMR {_kcal(bmr)} × activity {activity:.2f} = {_kcal(seed)} kcal maintenance",
+        f"Goal {rate_disp:+.{rate_dec}f} {rate_unit} = {_kcal(deficit)} kcal/day "
+        f"→ formula {_kcal(formula_target)} kcal",
+    ]
+    if res.get("logged_avg") is not None and obs is not None \
+            and res.get("maintenance") is not None:
+        auto_lines.append(
+            f"Observed {obs_disp:+.{rate_dec}f} {rate_unit} on "
+            f"{_kcal(res['logged_avg'])} kcal/day → maintenance "
+            f"{_kcal(res['maintenance'])} kcal")
+    if res.get("proposed") is not None:
+        auto_lines.append(
+            f"Proposed {_kcal(res['proposed'])} kcal, bounded by BMR floor "
+            f"{_kcal(res.get('floor') or floor)} → adaptive "
+            f"{_kcal(res.get('target') or auto_target)} kcal")
+    if res.get("reason") and not res.get("adjusted"):
+        auto_lines.append(f"Adaptive engine: {res['reason']}.")
+    if res.get("adjusted") or res.get("logged_avg") is not None:
+        auto_hint = f"Auto target {_kcal(auto_target)} kcal — adaptive from your weight trend."
+    else:
+        auto_hint = (f"Auto target {_kcal(auto_target)} kcal — formula estimate; "
+                     f"{res.get('reason') or 'adaptive data is still thin'}.")
+
+    if locked:
+        mode = "manual"
+        target = round(float(stored)) if stored is not None else formula_target
+        lines = [f"Manual target {_kcal(target)} kcal — automatic adjustments paused."]
+        hint = f"Manual target {_kcal(target)} kcal — automatic adjustments paused."
+    elif not adapt_on:
+        mode = "fixed"
+        target = round(float(stored)) if stored is not None else formula_target
+        lines = auto_lines[:2] + [
+            "Automatic adaptation is off; using the formula target."]
+        hint = (f"Auto target {_kcal(target)} kcal — formula only; "
+                "automatic adjustments are off.")
+    else:
+        mode = "auto"
+        target = auto_target
+        lines = auto_lines
+        hint = auto_hint
+
+    adaptive = {
+        "applied": bool(res.get("adjusted")) and mode == "auto",
+        "maintenance": (round(res["maintenance"])
+                        if res.get("maintenance") is not None else None),
+        "proposed": (round(res["proposed"])
+                     if res.get("proposed") is not None else None),
+        "floor": round(res.get("floor") or floor),
+        "ceiling": (round(res["ceiling"])
+                    if res.get("ceiling") is not None else None),
+        "logged_avg": res.get("logged_avg"),
+        "logged_days": res.get("logged_days"),
+        "observed_rate_kg_per_week": obs,
+        "reason": res.get("reason"),
+        "target": (round(res["target"])
+                   if res.get("target") is not None else None),
+    }
+    return {
+        "mode": mode,
+        "target": target,
+        "auto_target": auto_target,
+        "formula_target": formula_target,
+        "bmr": round(bmr),
+        "seed": round(seed),
+        "current_kg": current_kg,
+        "activity_factor": round(activity, 2),
+        "weekly_rate_kg": rate,
+        "deficit": round(deficit),
+        "adaptive": adaptive,
+        "lines": lines,
+        "auto_lines": auto_lines,
+        "hint": hint,
+        "auto_hint": auto_hint,
+    }
 
 
 def _unlink(path) -> None:

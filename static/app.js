@@ -316,7 +316,7 @@ function renderStatus(s) {
   if (s.needs_setup) bits.push(['warn', 'Tell us your height and goal in Settings to seed your calorie target.']);
   if (s.exercise) bits.push(['', `<b>+${fmt(s.exercise)}</b> kcal credited from activity today`]);
   if (s.settings && s.settings.calorie_target_locked) {
-    bits.push(['', 'Target locked — automatic adjustments paused.']);
+    bits.push(['', 'Manual target — automatic adjustments paused.']);
   } else if (!tr.reliable && (s.weights_count || 0) >= 4) {
     bits.push(['', 'Target holding — needs 14 days / 8 weigh-ins of trend data.']);
   }
@@ -1489,8 +1489,11 @@ guardClick('btn-weight', async () => {
     });
     $('w-value').value = '';
     dockPrefill = false;
+    const delta = Number(res.delta) || 0;
     toast(res.adapted
-      ? `Weight logged · target moved to ${fmt(res.target)} kcal (${res.delta > 0 ? '+' : ''}${res.delta})`
+      ? (delta
+          ? `Weight logged · target moved to ${fmt(res.target)} kcal (${delta > 0 ? '+' : ''}${delta})`
+          : `Weight logged · target set to ${fmt(res.target)} kcal`)
       : 'Weight logged');
     await refresh();
   } catch (err) { toast(err.message, true); }
@@ -1713,6 +1716,43 @@ function drawIntakeChart(h) {
 }
 
 // ------------------------------------------------------------------ settings
+// Auto target = no manual pin: the input is blank and the calculated number is
+// a ghost placeholder. Typing a number switches the field to manual (the form
+// save persists calorie_target_locked), and clearing it returns to auto.
+function setTargetCalc(lines) {
+  const detail = $('s-target-calc'), list = $('s-target-calc-list');
+  if (!detail || !list) return;
+  list.innerHTML = (lines || []).map(line => `<li>${esc(line)}</li>`).join('');
+  detail.hidden = !(lines && lines.length);
+  if (detail.hidden) detail.open = false;
+}
+
+function renderTargetField() {
+  const s = state?.settings || {};
+  const td = state?.target_detail || {};
+  const manual = !!s.calorie_target_locked;
+  const autoTarget = td.auto_target != null ? td.auto_target
+    : (td.target != null ? td.target : (state?.targets || {}).calories);
+  const autoLines = (td.auto_lines || td.lines || []).join('\n');
+  const input = $('s-target');
+  if (!input) return;
+  input.value = manual ? (s.calorie_target ?? '') : '';
+  input.placeholder = manual ? '' : (autoTarget != null ? fmt(autoTarget) : 'auto');
+  input.classList.toggle('ghost', !manual);
+  input.title = manual ? (td.lines || []).join('\n') : autoLines;
+  if ($('s-target-label')) $('s-target-label').title = input.title;
+  $('btn-unlock').textContent = manual ? 'manual' : 'auto';
+  $('btn-unlock').title = manual
+    ? 'Switch back to the automatic target'
+    : 'Pin the automatic target as manual';
+  $('s-autoadapt').checked = !manual && s.auto_adapt !== false;
+  $('s-autoadapt').disabled = manual;
+  const hint = (manual ? td.hint : (td.auto_hint || td.hint)) || '';
+  $('s-target-hint').textContent = hint;
+  $('s-target-hint').hidden = !hint;
+  setTargetCalc(manual ? td.lines : (td.auto_lines || td.lines));
+}
+
 function renderSettings() {
   const s = state.settings || {};
   const imp = U.imperial;
@@ -1734,7 +1774,9 @@ function renderSettings() {
   $('height-metric-field').hidden = imp;
   $('height-imperial-field').hidden = !imp;
 
-  $('s-activity').value = String(s.activity_factor ?? 1.4);
+  const activity = String(s.activity_factor ?? 1.35);
+  $('s-activity').value = ['1.2', '1.35', '1.5', '1.7', '1.9'].includes(activity)
+    ? activity : '1.35';
 
   // Weekly goal: stored kg/wk; show lb when imperial (with a finer step).
   const rateKg = s.weekly_rate_kg ?? -0.5;
@@ -1758,15 +1800,11 @@ function renderSettings() {
     $('s-protein-label').textContent = imp ? 'Protein (g per lb)' : 'Protein (g per kg)';
   }
   $('s-fatpct').value = s.fat_calorie_pct ?? 0.25;
-  $('s-target').value = s.calorie_target ?? '';
-  $('s-autoadapt').checked = s.auto_adapt !== false && !s.calorie_target_locked;
-  $('s-autoadapt').disabled = !!s.calorie_target_locked;
+  renderTargetField();
   $('s-calibrate').checked = s.calibrate_estimates !== false;
   if ($('s-photo-retention')) {
     $('s-photo-retention').value = String(s.photo_retention_months ?? 12);
   }
-  $('btn-unlock').textContent = s.calorie_target_locked ? 'locked' : 'auto';
-  $('s-lock-hint').hidden = !s.calorie_target_locked;
   syncWeightDock();
 
   const buildLine = $('app-build-line');
@@ -2287,6 +2325,11 @@ $('btn-save').addEventListener('click', async () => {
     toast('Grouping window must be 5–120 minutes', true);
     return;
   }
+  // A typed calorie target is a manual pin; an empty box means auto. Clearing
+  // a previously pinned target must actively release it, but an already-auto
+  // box must leave the stored adaptive target alone.
+  const wasManual = !!state?.settings?.calorie_target_locked;
+  const typedTarget = $('s-target').value.trim();
   // Convert display-unit inputs back to canonical metric before sending.
   const height_cm = imp
     ? U.heightToCm($('s-height-ft').value, $('s-height-in').value)
@@ -2297,7 +2340,7 @@ $('btn-save').addEventListener('click', async () => {
     sex: $('s-sex').value,
     age: Number($('s-age').value),
     height_cm: Math.round(height_cm),
-    activity_factor: Number($('s-activity').value),
+    activity_factor: Number($('s-activity').value) || 1.35,
     weekly_rate_kg: +(imp ? U.lbToKg(rateShown) : rateShown).toFixed(3),
     protein_g_per_kg: Number(U.proteinFromDisplay($('s-protein').value).toFixed(3)),
     fat_calorie_pct: Number($('s-fatpct').value),
@@ -2307,13 +2350,31 @@ $('btn-save').addEventListener('click', async () => {
     meal_gap_minutes: gap,
     photo_retention_months: Number($('s-photo-retention').value),
   };
-  const tgt = Number($('s-target').value);
-  if (tgt) payload.calorie_target = tgt;
+  if (typedTarget) {
+    const tgt = Number(typedTarget);
+    if (!(Number.isFinite(tgt) && tgt >= 1000 && tgt <= 8000)) {
+      toast('Calorie target must be between 1,000 and 8,000 kcal', true);
+      return;
+    }
+    payload.calorie_target = Math.round(tgt);
+    payload.calorie_target_locked = true;
+    payload.auto_adapt = false;
+  } else if (wasManual) {
+    payload.calorie_target = null;
+    payload.calorie_target_locked = false;
+    payload.auto_adapt = true;
+  }
   try {
     await api('settings', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    // Releasing a manual pin should take effect now, not at the next weigh-in.
+    if (!typedTarget && wasManual) {
+      try {
+        await api('adapt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      } catch (_) { /* the next state render shows the formula target */ }
+    }
     toast('Saved');
     await refresh();
     renderSettings();   // re-render so fields reflect any unit change immediately
@@ -2327,30 +2388,65 @@ $('s-units').addEventListener('change', () => {
   renderSettings();
 });
 
-// "auto"/"locked" button toggles whether the calorie target is user-pinned or
-// left for the adaptive engine to manage. One PUT, no round-trips.
+// Typing in the calorie target switches the field to manual; clearing it
+// returns to auto. This is local UI state until Save persists it.
+$('s-target').addEventListener('input', () => {
+  const input = $('s-target');
+  const typed = input.value.trim() !== '';
+  const td = state?.target_detail || {};
+  const autoTarget = td.auto_target != null ? td.auto_target
+    : (td.target != null ? td.target : (state?.targets || {}).calories);
+  const autoLines = (td.auto_lines || td.lines || []).join('\n');
+  input.placeholder = typed ? '' : (autoTarget != null ? fmt(autoTarget) : 'auto');
+  input.classList.toggle('ghost', !typed);
+  $('btn-unlock').textContent = typed ? 'manual' : 'auto';
+  $('btn-unlock').title = typed
+    ? 'Switch back to the automatic target'
+    : 'Pin the automatic target as manual';
+  $('s-autoadapt').disabled = typed;
+  if (typed) {
+    $('s-autoadapt').checked = false;
+    $('s-target-hint').textContent =
+      'Manual target — automatic adjustments will be paused when you save.';
+    $('s-target-hint').hidden = false;
+    setTargetCalc([]);
+  } else {
+    $('s-autoadapt').checked = true;
+    $('s-target-hint').textContent = td.auto_hint || td.hint || '';
+    $('s-target-hint').hidden = !(td.auto_hint || td.hint);
+    input.title = autoLines;
+    if ($('s-target-label')) $('s-target-label').title = autoLines;
+    setTargetCalc(td.auto_lines || td.lines);
+  }
+});
+
+// "auto" / "manual" button: pin the current auto target as a manual number, or
+// clear the pin and let the adaptive engine recalculate.
 $('btn-unlock').addEventListener('click', async () => {
   const s = state.settings || {};
-  const locked = !!s.calorie_target_locked;
-  const fallback = (state.targets && state.targets.calories) || 2200;
+  const manualNow = $('btn-unlock').textContent.trim() === 'manual';
+  const current = state.target_detail || {};
+  const fallback = current.target || (state.targets && state.targets.calories) || 2200;
   try {
-    if (locked) {
-      // Unlock: clear the pin and let the weekly adaptive loop resume.
+    if (manualNow) {
       await api('settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ calorie_target_locked: false, calorie_target: null,
                                auto_adapt: true }),
       });
+      // Recalculate now rather than waiting for the next weigh-in.
+      try {
+        await api('adapt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      } catch (_) { /* the next state render shows the formula target */ }
       toast('Target set to auto');
     } else {
-      // Lock is a real freeze: keep the number and pause adaptation.
       await api('settings', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ calorie_target_locked: true,
                                calorie_target: s.calorie_target || fallback,
                                auto_adapt: false }),
       });
-      toast('Target locked');
+      toast('Target set to manual');
     }
     await refresh();
     if ($('view-settings').classList.contains('active')) renderSettings();
