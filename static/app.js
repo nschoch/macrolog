@@ -58,6 +58,17 @@ const U = {
     return sign + v.toFixed(this.imperial ? 1 : 2) +
       (withUnit ? (this.imperial ? ' lb/wk' : ' kg/wk') : '');
   },
+  // Protein target ratio: canonical storage is g/kg of body weight. Imperial
+  // profiles read g/lb, so convert only at the display/input edge. This is a
+  // ratio, not a mass: 1 g/kg = 1/2.2046 g/lb.
+  proteinToDisplay(gPerKg) {
+    if (gPerKg == null || isNaN(gPerKg)) return '';
+    return this.imperial ? gPerKg / LB_PER_KG : gPerKg;
+  },
+  proteinFromDisplay(value) {
+    const v = Number(value);
+    return this.imperial ? v * LB_PER_KG : v;
+  },
   // Height: metric shows "178 cm"; imperial shows feet+inches like 5'10".
   height(cm) {
     if (cm == null || isNaN(cm)) return '';
@@ -1735,7 +1746,17 @@ function renderSettings() {
   $('s-rate').min = imp ? '-3.3' : '-1.5';
   $('s-rate').max = imp ? '2.2' : '1';
 
-  $('s-protein').value = s.protein_g_per_kg ?? 1.8;
+  // Protein goal: canonical g/kg; imperial profiles read/enter g/lb, so the
+  // ratio is converted at the display edge just like body weight and height.
+  const proteinKg = s.protein_g_per_kg ?? 1.8;
+  const proteinShown = U.proteinToDisplay(proteinKg);
+  $('s-protein').value = imp ? +Number(proteinShown).toFixed(2) : proteinKg;
+  $('s-protein').step = imp ? '0.02' : '0.1';
+  $('s-protein').min = imp ? '0.36' : '0.8';
+  $('s-protein').max = imp ? '1.36' : '3';
+  if ($('s-protein-label')) {
+    $('s-protein-label').textContent = imp ? 'Protein (g per lb)' : 'Protein (g per kg)';
+  }
   $('s-fatpct').value = s.fat_calorie_pct ?? 0.25;
   $('s-target').value = s.calorie_target ?? '';
   $('s-autoadapt').checked = s.auto_adapt !== false && !s.calorie_target_locked;
@@ -2278,7 +2299,7 @@ $('btn-save').addEventListener('click', async () => {
     height_cm: Math.round(height_cm),
     activity_factor: Number($('s-activity').value),
     weekly_rate_kg: +(imp ? U.lbToKg(rateShown) : rateShown).toFixed(3),
-    protein_g_per_kg: Number($('s-protein').value),
+    protein_g_per_kg: Number(U.proteinFromDisplay($('s-protein').value).toFixed(3)),
     fat_calorie_pct: Number($('s-fatpct').value),
     auto_adapt: $('s-autoadapt').checked,
     calibrate_estimates: $('s-calibrate').checked,

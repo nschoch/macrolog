@@ -1156,6 +1156,53 @@ try {
   check('grouping window saves from Settings', gs.saved === 45, gapSetting);
   check('grouping window restores to 30', gs.restored === 30, gapSetting);
 
+  // ---- Imperial profiles read the protein goal in g/lb ------------------
+  // Storage stays canonical g/kg; only the Settings label and input convert.
+  const proteinUnits = await evalJson(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    document.querySelector('button[data-view="settings"]').click();
+    await wait(300);
+    const oldUnits = state.settings.units;
+    const oldProtein = state.settings.protein_g_per_kg;
+    state.settings.protein_g_per_kg = 2.0;
+    state.settings.units = 'imperial';
+    renderSettings();
+    const imp = {
+      label: document.getElementById('s-protein-label').textContent.trim(),
+      value: document.getElementById('s-protein').value,
+      step: document.getElementById('s-protein').step,
+      min: document.getElementById('s-protein').min,
+      max: document.getElementById('s-protein').max,
+      roundTrip: U.proteinFromDisplay(U.proteinToDisplay(2.0)),
+      oneToOne: U.proteinFromDisplay(1.0),
+    };
+    state.settings.units = 'metric';
+    renderSettings();
+    const met = {
+      label: document.getElementById('s-protein-label').textContent.trim(),
+      value: document.getElementById('s-protein').value,
+    };
+    state.settings.units = oldUnits;
+    state.settings.protein_g_per_kg = oldProtein;
+    renderSettings();
+    document.querySelector('button[data-view="today"]').click();
+    return JSON.stringify({ imp, met });
+  })()`);
+  const pu = JSON.parse(proteinUnits);
+  check('imperial protein goal reads g per lb',
+        pu.imp.label === 'Protein (g per lb)', proteinUnits);
+  check('imperial protein value is converted from g/kg',
+        Math.abs(Number(pu.imp.value) - 0.91) < 0.011
+        && pu.imp.step === '0.02' && pu.imp.min === '0.36' && pu.imp.max === '1.36',
+        JSON.stringify(pu.imp));
+  check('metric protein goal stays g per kg',
+        pu.met.label === 'Protein (g per kg)' && Number(pu.met.value) === 2,
+        JSON.stringify(pu.met));
+  check('protein ratio converts back to canonical g/kg',
+        Math.abs(pu.imp.roundTrip - 2.0) < 1e-9
+        && Math.abs(pu.imp.oneToOne - 2.2046226) < 1e-6,
+        JSON.stringify({ roundTrip: pu.imp.roundTrip, oneToOne: pu.imp.oneToOne }));
+
   // ---- The browser must tell the server its own timezone ----------------
   const tzHeader = await evalJson(`(async () => {
     const seen = [];
